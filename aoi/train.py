@@ -45,6 +45,8 @@ class TrainingReward(gym.RewardWrapper):
 
     def __init__(self, env, divisor=None):
         super().__init__(env)
+        # N*diam(G) is a numerical conditioning heuristic. Positive constant
+        # scaling preserves reward ordering, but can affect the learner's updates.
         self.divisor = (env.unwrapped.n * nx.diameter(
             nx.from_numpy_array(env.unwrapped.model.adjacency))
             if divisor is None else parse_reward_divisor(divisor))
@@ -70,7 +72,9 @@ class TrainingResult:
         return "cycle" if self.schedules else "evaluation_limit"
 
     def insert(self, candidate, window):
-        # The best average only decreases: discarded points cannot re-enter.
+        # For a fixed window, best+window only decreases, so excluded points cannot
+        # re-enter. Transitivity preserves dominance when a better point replaces
+        # a dominator. Thus pruning preserves the frontier of discovered words.
         point = metric_point(candidate)
         # Weak dominance also deduplicates identical points (first wins).
         if any(a <= point[0] and p <= point[1]
@@ -127,6 +131,9 @@ class ScheduleFrontier(BaseCallback):
         self.result = TrainingResult()
 
     def _validate(self):
+        # A fresh, unscaled environment isolates resets and block memory from the
+        # live rollout. Deterministic prediction avoids exploration RNG draws;
+        # exact evaluation measures physical ages, independent of reward scaling.
         env = self.env_factory()
         try:
             candidate = evaluate_policy(self.model, env, max_steps=self.max_steps)
@@ -149,7 +156,21 @@ def train(adjacency, output="result.json", *, algorithm="ppo", connected_block=F
           timesteps=1_000_000, seed=0, gamma=0.999, validation_every=25_000,
           max_steps=50_000, device="cpu", reward_divisor=None, average_window=1,
           algorithm_options=None):
-    """Train with numerical reward scaling and write verified periodic words."""
+    """Train PPO/DQN and return a TrainingResult, also written to new JSON output.
+
+    ``adjacency`` follows AoIEnv's requirements; ``connected_block`` selects the
+    heuristic restriction. ``timesteps`` is the requested SB3 budget (PPO may
+    finish its rollout); ``algorithm_options`` passes extra SB3 settings through.
+    ``reward_divisor=None`` uses N*diam(G); a positive override affects training
+    only. ``gamma`` discounts learner returns, not the exact physical metrics.
+
+    ``validation_every=0`` requests final validation only; otherwise validation
+    also runs at that step interval. ``max_steps`` bounds each policy evaluation.
+    ``average_window`` retains nondominated discoveries within that exact rational
+    distance of the best discovered average. This is not the global Pareto frontier.
+    If no cycle is verified, the result has status ``evaluation_limit``.
+    Existing output raises FileExistsError; a missing parent raises FileNotFoundError.
+    """
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"Output file already exists: {output}")

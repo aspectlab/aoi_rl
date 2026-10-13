@@ -19,6 +19,8 @@ def observation_mask(obs, n):
 class MaskedQNetwork(QNetwork):
     def forward(self, obs):
         q = super().forward(obs)
+        # Used by BOTH networks: illegal actions must not win greedy prediction
+        # or the successor-state max in Bellman targets, even with large raw Q.
         return q.masked_fill(~observation_mask(obs, math.isqrt(self.action_space.n)), -torch.inf)
 
 
@@ -39,6 +41,8 @@ class MaskedDQN(DQN):
             raise ValueError("MaskedDQN requires MaskedDQNPolicy.")
 
     def _random_legal(self, observation):
+        # Random warmup and epsilon exploration bypass greedy Q selection, so
+        # they need their own mask. Stored memory also makes replay masks valid.
         obs = np.asarray(observation)
         n = math.isqrt(self.action_space.n)
         active, holders = obs[..., -2*n:-n] > 0.5, obs[..., -n:] > 0.5
@@ -70,6 +74,8 @@ class MaskedActorCriticPolicy(ActorCriticPolicy):
         return self.mlp_extractor.forward_actor(actor), self.mlp_extractor.forward_critic(critic)
 
     def _distribution(self, obs, latent):
+        # PPO must recompute the same masked support for rollout likelihoods and
+        # update-time ratios/entropy; masking only sampled actions changes the loss.
         logits = self.action_net(latent)
         mask = observation_mask(obs, math.isqrt(self.action_space.n))
         # A finite sentinel prevents undefined entropy gradients from zero * -inf.

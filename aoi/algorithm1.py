@@ -23,6 +23,11 @@ def algorithm1_schedule(adjacency) -> Algorithm1Result:
 
     Ties use lexicographically first MCDSs and ascending DFS neighbors. Exact
     MCDS enumeration can take exponential time; no approximation is substituted.
+
+    ``adjacency`` must satisfy AoIEnv's graph requirements. Returns an
+    Algorithm1Result with the word, minimum connected domination number gamma_c,
+    and pseudoleaves L (vertices in no MCDS, not necessarily graph leaves).
+    Its word length is T* = N*gamma_c + |L|; AoI metrics require separate replay.
     """
     graph = nx.from_numpy_array(validate_adjacency(adjacency))
     n = len(graph)
@@ -45,10 +50,15 @@ def algorithm1_schedule(adjacency) -> Algorithm1Result:
     if first is None:
         raise RuntimeError("Connected graph has no connected dominating set.")
     pseudoleaves = tuple(v for v in range(n) if containing[v] is None)
+    # Connectivity lets informed vertices relay; domination reaches every node.
+    # A pseudoleaf adds one transmitter to an MCDS. Domination guarantees that
+    # this added source touches the backbone, keeping the augmented set connected.
     actions = []
     for source in range(n):
         backbone = set(containing[source] or first) | {source}
         visited, stack = set(), [source]
+        # DFS emits each relay once after an informed predecessor. Backtracking
+        # needs no transmission: holders retain the update across DFS branches.
         while stack:
             tx = stack.pop()
             if tx in visited:

@@ -32,11 +32,30 @@ def evaluate_policy(model, env, *, max_steps=50_000) -> PolicyResult:
     The returned action word preserves the complete controlled-state recurrence,
     including its phase. Its length can differ from the independently evaluated
     periodic word's physical period; the latter is stored in the metrics.
+
+    Parameters
+    ----------
+    model : object with predict(obs, deterministic=True)
+        Frozen, stationary, memoryless policy; hidden recurrent state is unsupported.
+    env : AoIEnv or ConnectedBlockEnv
+        Continuing evaluation environment; this call resets and advances it.
+    max_steps : int
+        Positive controlled-trajectory budget, also used as replay repetition budget.
+
+    Returns
+    -------
+    PolicyResult
+        Verified cycle and transient, or status ``evaluation_limit`` if either
+        recurrence search exhausts its budget. A limit is not proof of divergence;
+        a verified cycle certifies this trajectory, not global optimality.
     """
     positive_integer(max_steps, "max_steps")
     obs, _ = env.reset()
     seen, actions, totals, peaks = {}, [], [], []
     for t in range(max_steps + 1):
+        # A fixed policy supplies the next action, so no external word phase is
+        # needed. All physical ages AND block memory must recur: equal rewards,
+        # actions, or rounded float observations do not determine the same future.
         key = env.state_key()
         if key in seen:
             start = seen[key]

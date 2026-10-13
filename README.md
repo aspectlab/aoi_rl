@@ -17,6 +17,24 @@ For tests, install `pip install '.[dev]'` and run `pytest -q`. Dependencies are
 NumPy, NetworkX, Gymnasium, Stable-Baselines3, and PyTorch. SB3 is pinned to the
 version supported by the custom action masks.
 
+## Architecture
+
+The physical model and exact evaluators are independent of the RL algorithms:
+they can simulate and verify externally supplied words or the constructive
+baseline. Training uses the same physical dynamics and delegates verification
+to these evaluators.
+
+| Module | Responsibility |
+| --- | --- |
+| `env.py` | Physical AoI simulation and unrestricted environment. |
+| `blocks.py` | Connected-block restrictions and their explicit memory. |
+| `policies.py` | PPO/DQN integration and action masking throughout learning. |
+| `train.py` | Training, isolated validation, and discovered-frontier retention. |
+| `schedules.py`, `policy_eval.py` | Exact fixed-word and deterministic-policy recurrence evaluation. |
+| `algorithm1.py` | Constructive baseline using minimum connected dominating sets. |
+| `graphs.py` | External graph input/output with label preservation. |
+| `__main__.py` | Command-line interface. |
+
 ## Model and graph input
 
 Each node is the source of one process. Each slot contains one action

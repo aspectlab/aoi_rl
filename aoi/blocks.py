@@ -29,6 +29,9 @@ class BlockRule:
         if not self.legal(memory, pair):
             raise ValueError("Action violates connected-block legality.")
         i, j = pair
+        # Every source action starts a new update, even for the same process.
+        # Holders are a bit set of nodes reached by this block's update; only
+        # these nodes may relay it, and previous branches remain available.
         holders = (1 << j) if i == j else memory.holders
         return BlockMemory(j, holders | self.neighbors[i])
 
@@ -46,7 +49,17 @@ class BlockRule:
 
 
 class ConnectedBlockEnv(AoIEnv):
-    """Same physical model, with explicit block memory and illegal-action errors."""
+    """Apply a source-started search heuristic to the AoIEnv physical model.
+
+    ``adjacency`` has the same requirements as AoIEnv. Observations append an
+    N-entry active-source one-hot vector and N holder bits to the physical ages.
+    Reset has no active block, so only sources may transmit initially. Later,
+    any source may restart a block; relays must hold the active block's update.
+    Illegal actions raise ValueError. This restriction is not proved lossless.
+
+    Block memory records update membership, which ages alone do not encode;
+    it is needed both for action masks and for controlled-state recurrence.
+    """
 
     def __init__(self, adjacency):
         super().__init__(adjacency)

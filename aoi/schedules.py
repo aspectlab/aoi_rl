@@ -49,6 +49,9 @@ class CycleMetrics:
 
 def cycle_metrics(total_age: int, peak_age: int, period: int, n: int) -> CycleMetrics:
     """Integrate a closed integer-state cycle; peak is a supremum, not a mean."""
+    # Each unit slot contributes boundary age + 1/2 to its integral and approaches
+    # boundary age + 1 before reception. On a closed cycle, pre/post-step boundary
+    # samples differ only by a cyclic shift; these are not boundary-only metrics.
     return CycleMetrics(period, Fraction(total_age, period * n * (n - 1))
                         + Fraction(1, 2), peak_age + 1)
 
@@ -67,6 +70,26 @@ def evaluate_schedule(adjacency, actions, *, max_repetitions: int = 1000) -> Sch
 
     Always uses unrestricted physical dynamics. The limit is a resource budget;
     exceeding it does not establish that the word has unbounded ages.
+
+    Parameters
+    ----------
+    adjacency : array-like, shape (N, N)
+        Graph satisfying AoIEnv's adjacency requirements.
+    actions : iterable of (int, int)
+        Nonempty word of (transmitter, process) pairs, repeated from initialization.
+    max_repetitions : int
+        Positive budget in repetitions of the primitive word.
+
+    Returns
+    -------
+    ScheduleResult
+        Primitive word (same phase) and exact recurrent continuous metrics,
+        excluding the transient. The reported period can span multiple copies.
+
+    Raises
+    ------
+    EvaluationLimit
+        No matching word-boundary state was found within the budget.
     """
     positive_integer(max_repetitions, "max_repetitions")
     model = AoIModel(adjacency)
@@ -74,6 +97,9 @@ def evaluate_schedule(adjacency, actions, *, max_repetitions: int = 1000) -> Sch
     indices = tuple(model.action_index(a) for a in word)
     state = model.initial_state.copy()
     seen = {}
+    # A fixed word is an external clock: physical equality is sufficient only
+    # at matching word phase. Cached updates can persist across repetitions,
+    # so the word's length alone does not establish physical state closure.
     for repetition in range(max_repetitions + 1):
         key = tuple(map(int, state))
         if key in seen:

@@ -65,6 +65,8 @@ class AoIModel:
         if int(x.max()) >= np.iinfo(np.int64).max:
             raise OverflowError("Age exceeds the supported integer range.")
         y = x.astype(np.int64, copy=True) + 1
+        # A source generates now; a relay sends its cached pre-slot copy. Reading
+        # x (never y) makes reception simultaneous, with no intra-slot forwarding.
         relay_age = 1 if i == j else int(x[self.lookup[i, j]]) + 1
         monitors = self.neighbors[i]
         indices = self.lookup[monitors[monitors != j], j]
@@ -78,6 +80,19 @@ class AoIEnv(gym.Env):
     Reset uses shortest-path ages. Observations are unnormalized float32 ages;
     the mathematical state remains integer valued. Reward is negative post-slot
     average age. There is no natural termination or truncation.
+
+    Parameters
+    ----------
+    adjacency : array-like, shape (N, N)
+        Binary, symmetric, connected graph with zero diagonal and N >= 2.
+
+    Notes
+    -----
+    State entry (m, j) is the age of process j cached at monitor m at a slot
+    boundary. Only m != j is stored, in monitor-major order; local ages are zero.
+    Distance initialization is a computational starting state, not a reception
+    history. Action i*N+j broadcasts process j from i to all its neighbors;
+    all N² pairs are legal, including fresh source transmissions with i == j.
     """
 
     metadata = {"render_modes": []}
