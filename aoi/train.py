@@ -1,21 +1,104 @@
-"""Continuing PPO/DQN training that retains only the best verified schedule."""
+"""Continuing PPO/DQN training with a small exact schedule frontier."""
 import json
+from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 
+import gymnasium as gym
+import networkx as nx
 import numpy as np
 from stable_baselines3 import DQN, PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
 from .blocks import ConnectedBlockEnv
 from .env import AoIEnv
+from .graphs import graph_to_dict
 from .policies import MaskedActorCriticPolicy, MaskedDQN
 from .policy_eval import evaluate_policy
-from .schedules import positive_integer
+from .schedules import ScheduleResult, positive_integer
+
+
+def parse_reward_divisor(value):
+    """Validate the finite positive numerical training scale."""
+    try:
+        divisor = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("reward_divisor must be a positive finite number.") from exc
+    if isinstance(value, bool) or not np.isfinite(divisor) or divisor <= 0:
+        raise ValueError("reward_divisor must be a positive finite number.")
+    return divisor
+
+
+def parse_average_window(value):
+    """Parse decimal text exactly; Python floats use their decimal spelling."""
+    try:
+        window = Fraction(str(value))
+    except (ValueError, ZeroDivisionError) as exc:
+        raise ValueError("average_window must be a nonnegative finite number.") from exc
+    if window < 0:
+        raise ValueError("average_window must be a nonnegative finite number.")
+    return window
+
+
+class TrainingReward(gym.RewardWrapper):
+    """Scale only the learner's reward; physical state and info remain raw."""
+
+    def __init__(self, env, divisor=None):
+        super().__init__(env)
+        self.divisor = (env.unwrapped.n * nx.diameter(
+            nx.from_numpy_array(env.unwrapped.model.adjacency))
+            if divisor is None else parse_reward_divisor(divisor))
+
+    def reward(self, reward):
+        return reward / self.divisor
+
+
+def metric_point(schedule):
+    return (schedule.metrics.continuous_average_aoi,
+            schedule.metrics.continuous_peak_aoi)
+
+
+@dataclass
+class TrainingResult:
+    """Only nondominated verified words in the current exact average window."""
+
+    schedules: list[ScheduleResult] = field(default_factory=list)
+    graph: dict | None = None
+
+    @property
+    def status(self):
+        return "cycle" if self.schedules else "evaluation_limit"
+
+    def insert(self, candidate, window):
+        # The best average only decreases: discarded points cannot re-enter.
+        point = metric_point(candidate)
+        # Weak dominance also deduplicates identical points (first wins).
+        if any(a <= point[0] and p <= point[1]
+               for a, p in map(metric_point, self.schedules)):
+            return
+        best = min(point[0], self.schedules[0].metrics.continuous_average_aoi
+                   if self.schedules else point[0])
+        if point[0] > best + window:
+            return
+        self.schedules[:] = [s for s in self.schedules
+            if s.metrics.continuous_average_aoi <= best + window
+            and not (point[0] <= s.metrics.continuous_average_aoi
+                     and point[1] <= s.metrics.continuous_peak_aoi)]
+        self.schedules.append(candidate)
+        self.schedules.sort(key=metric_point)
+
+    def to_dict(self):
+        graph = {"graph": self.graph} if self.graph is not None else {}
+        if not self.schedules:
+            return {**graph, "status": self.status}
+        words = [{"cycle_actions": [list(a) for a in s.actions], **s.metrics.to_dict()}
+                 for s in self.schedules]
+        return {**graph, "status": self.status, "best_average": words[0], "alternatives": words[1:]}
 
 
 def make_model(env, *, algorithm="ppo", connected_block=False, gamma=0.999,
-               seed=0, device="cpu", **algorithm_options):
-    """Construct SB3; gamma and other numerical settings do not change the model."""
+               seed=0, device="cpu", reward_divisor=None, **algorithm_options):
+    """Construct SB3 with training-only reward scaling and unchanged masks."""
     if algorithm not in ("ppo", "dqn"):
         raise ValueError("Algorithm must be ppo or dqn.")
     if not np.isfinite(gamma) or not 0 < gamma <= 1:
@@ -24,13 +107,15 @@ def make_model(env, *, algorithm="ppo", connected_block=False, gamma=0.999,
         raise ValueError("Policy restriction and environment must agree.")
     cls = PPO if algorithm == "ppo" else (MaskedDQN if connected_block else DQN)
     policy = MaskedActorCriticPolicy if algorithm == "ppo" and connected_block else "MlpPolicy"
-    return cls(policy, env, gamma=gamma, seed=seed, device=device, **algorithm_options)
+    return cls(policy, TrainingReward(env, reward_divisor), gamma=gamma,
+               seed=seed, device=device, **algorithm_options)
 
 
-class BestSchedule(BaseCallback):
-    """Retain one verified result in memory, preferring lower exact average age."""
+class ScheduleFrontier(BaseCallback):
+    """Validate separately and retain only useful average/peak tradeoffs."""
 
-    def __init__(self, env_factory, *, validation_every=100_000, max_steps=50_000):
+    def __init__(self, env_factory, *, validation_every=25_000, max_steps=50_000,
+                 average_window=1):
         super().__init__()
         if (isinstance(validation_every, bool) or not isinstance(validation_every, int)
                 or validation_every < 0):
@@ -38,7 +123,8 @@ class BestSchedule(BaseCallback):
         self.env_factory = env_factory
         self.every = validation_every
         self.max_steps = positive_integer(max_steps, "max_steps")
-        self.result = None
+        self.window = parse_average_window(average_window)
+        self.result = TrainingResult()
 
     def _validate(self):
         env = self.env_factory()
@@ -46,11 +132,8 @@ class BestSchedule(BaseCallback):
             candidate = evaluate_policy(self.model, env, max_steps=self.max_steps)
         finally:
             env.close()
-        if (self.result is None or self.result.schedule is None
-                or (candidate.schedule is not None
-                    and candidate.schedule.metrics.continuous_average_aoi
-                    < self.result.schedule.metrics.continuous_average_aoi)):
-            self.result = candidate
+        if candidate.schedule is not None:
+            self.result.insert(candidate.schedule, self.window)
 
     def _on_step(self):
         if self.every and self.num_timesteps % self.every == 0:
@@ -63,9 +146,10 @@ class BestSchedule(BaseCallback):
 
 
 def train(adjacency, output="result.json", *, algorithm="ppo", connected_block=False,
-          timesteps=1_000_000, seed=0, gamma=0.999, validation_every=100_000,
-          max_steps=50_000, device="cpu", algorithm_options=None):
-    """Train with raw mean-age reward and write one selected schedule JSON file."""
+          timesteps=1_000_000, seed=0, gamma=0.999, validation_every=25_000,
+          max_steps=50_000, device="cpu", reward_divisor=None, average_window=1,
+          algorithm_options=None):
+    """Train with numerical reward scaling and write verified periodic words."""
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"Output file already exists: {output}")
@@ -75,10 +159,13 @@ def train(adjacency, output="result.json", *, algorithm="ppo", connected_block=F
     env_type = ConnectedBlockEnv if connected_block else AoIEnv
     env = env_type(adjacency)
     try:
-        callback = BestSchedule(lambda: env_type(env.model.adjacency),
-                                validation_every=validation_every, max_steps=max_steps)
+        callback = ScheduleFrontier(lambda: env_type(env.model.adjacency),
+                                    validation_every=validation_every, max_steps=max_steps,
+                                    average_window=average_window)
+        callback.result.graph = graph_to_dict(env.model.adjacency)
         model = make_model(env, algorithm=algorithm, connected_block=connected_block,
-                           gamma=gamma, seed=seed, device=device, **(algorithm_options or {}))
+                           gamma=gamma, seed=seed, device=device, reward_divisor=reward_divisor,
+                           **(algorithm_options or {}))
         model.learn(total_timesteps=timesteps, callback=callback)
         with output.open("x") as stream:
             stream.write(json.dumps(callback.result.to_dict(), indent=2, allow_nan=False) + "\n")
