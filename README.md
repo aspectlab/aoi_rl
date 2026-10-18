@@ -59,12 +59,11 @@ Alternatively, save a standalone graph as `graph.json`:
 
 ```json
 {
-  "num_nodes": 4,
-  "edges": [[0, 1], [1, 2], [2, 3]]
+  "graph": {"num_nodes": 4, "edges": [[0, 1], [1, 2], [2, 3]]}
 }
 ```
 
-These are the only permitted graph fields. `num_nodes` must be an integer at
+The inner `graph` has exactly these two fields. `num_nodes` must be an integer at
 least 2. Endpoints must be integers in `0, ..., num_nodes-1`, not Booleans.
 Graphs must be connected, undirected, and simple: self-loops, duplicate edges
 (including reversed duplicates), invalid endpoints, and malformed inputs are
@@ -98,6 +97,38 @@ in ascending order.
 The word length is `T* = N*gamma_c + |L|`, where `gamma_c` is the minimum connected
 domination number and `L` consists of vertices in no MCDS. MCDS enumeration is
 exact and can take exponential time. Only Algorithm 1 performs this search.
+
+Algorithm 1 also reports the exact average-age bounds from
+[Farazi–Klein–Brown (2019), DOI 10.1109/JCN.2019.000038](https://doi.org/10.1109/JCN.2019.000038):
+
+- Theorem 4, equation (15): `average_lower_tstar_periodic = T*/2 + d_bar`,
+  where `d_bar` is the exact mean shortest-path distance over ordered distinct pairs.
+  This lower bound applies to T*-periodic schedules updating all statuses.
+- Theorem 5, equation (16): `average_upper_algorithm1 = T*/2 + gamma_c + |L|/N`,
+  an upper bound on the average achieved by Algorithm 1.
+
+Neither is a universal bound or optimality certificate for arbitrary-period
+PPO/DQN schedules. Training does not compute these bounds or enumerate MCDSs.
+Achieved metrics always come from independent exact schedule replay.
+For P6, the bounds are `46/3` and `52/3`, while the constructed 26-transmission
+word achieves average `232/15` and supremum peak `31`.
+
+Every JSON document requires `graph`; `bounds`, `schedules`, and unsuccessful
+`status` are optional. Algorithm 1 outputs `graph`, `bounds`, and a one-entry
+`schedules` array. Each bound has an exact rational string and a matching
+`_decimal` JSON number rounded to six places.
+
+Reuse any result as graph input, creating a separate file for each run:
+
+```bash
+python -m aoi algorithm1 --edges "0-1,1-2,2-3,3-4,4-5" --output alg1.json
+python -m aoi train --graph alg1.json --algorithm ppo --connected-block --seed 0 --output ppo_seed0.json
+```
+
+`--graph` reads only the labeled graph from graph-only, Algorithm 1, training,
+or evaluation documents. Previous bounds and schedules are never carried over.
+Every output creates a new file: existing paths (including the input path) are
+rejected without modification. Results are never merged or appended.
 
 ## PPO and DQN
 
@@ -157,7 +188,7 @@ there are no validation logs or historical discoveries. The window affects
 reporting only: the training objective remains average AoI.
 
 A finite run need not discover a recurrent schedule. If none is verified,
-`result.json` contains only the top-level `graph` and `"status": "evaluation_limit"`,
+`result.json` contains `graph`, `"schedules": []`, and `"status": "evaluation_limit"`,
 with no invented schedule or recurrent metrics. This does not establish divergence.
 
 ## Action spaces and connected blocks
@@ -190,21 +221,22 @@ A successful learned result has this schema (a two-node example):
 ```json
 {
   "graph": {"num_nodes": 2, "edges": [[0, 1]]},
-  "status": "cycle",
-  "best_average": {
+  "schedules": [{
+    "method": "ppo",
     "cycle_actions": [[1, 1], [0, 0]],
     "period": 2,
     "continuous_average_aoi": "2",
+    "continuous_average_aoi_decimal": 2.0,
     "continuous_peak_aoi": 3
-  },
-  "alternatives": []
+  }]
 }
 ```
 
-`best_average` is always present on success. `alternatives` contains any other
-retained words, ordered by increasing average (then peak). Each entry has the
-same four fields. Index 0 (the default) selects `best_average`; indices 1, 2, ...
-select alternatives. Negative or out-of-range indices are rejected.
+`schedules[0]` is the minimum-average schedule discovered in this run.
+Subsequent entries are nondominated lower-peak alternatives within the configured
+average window, ordered by exact average then peak. Each entry identifies its
+`method` (`ppo`, `dqn`, or `algorithm1`). Index 0 is the default; `--schedule-index 1`
+selects the second entry. Invalid indices and empty arrays are rejected.
 
 Pairs are zero-based. `cycle_actions` preserves the entire observed
 controlled-state cycle in chronological order and can then repeat forever.
@@ -217,8 +249,9 @@ learned action word is retained to preserve its exact ordering and memory
 closure. No rotation is applied.
 
 Every exported result embeds its graph exactly once at the top level.
-Algorithm 1 and explicit-word evaluation produce a single schedule with `graph`, `status`,
-`cycle_actions`, and the three metric fields, without a frontier wrapper.
+Explicit evaluation outputs the graph and one selected, independently evaluated
+schedule in `schedules`. It preserves the saved method when present and uses
+`evaluation` for a standalone word. It does not copy analytical bounds.
 A hand-written input needs only `{"cycle_actions": [[0, 0], [1, 1]]}` for a
 suitable graph, supplied explicitly:
 
@@ -231,7 +264,7 @@ Self-contained results require no external graph. If one is supplied, its labele
 adjacency matrix must match the embedded graph exactly; conflicting graphs are
 rejected. `--edges` and `--graph` are mutually exclusive even for evaluation.
 Single schedules accept only index 0. A failure result has no schedule to replay
-and produces a clear input error. Evaluation accepts these formats and training JSON, and always
+and produces a clear input error. Evaluation accepts unified documents and standalone words with external graphs, and always
 recomputes metrics through the same independent unrestricted fixed-word evaluator
 rather than trusting supplied values.
 
@@ -244,14 +277,19 @@ Only stationary memoryless policies are supported by this evaluator.
 Fixed-word evaluation checks full integer states at matching word phase and
 verifies exact closure. If the cycle spans multiple word repetitions, all of
 them contribute to its period. `--max-repetitions` controls this evaluator's
-budget. Exhaustion returns the graph and `"status": "evaluation_limit"` without
+budget. Exhaustion returns the graph, an empty schedules array, and `"status": "evaluation_limit"` without
 classifying the word as bounded or unbounded. Use `--output evaluated.json` to
-save a self-contained evaluation result; otherwise it is printed to stdout.
+save a self-contained evaluation result. JSON is also printed to stdout;
+terminal average/bound summaries on stderr show decimal first, then the exact
+fraction in parentheses.
 
 For a verified recurrent period `P` and `M=N*(N-1)` ages:
 
 - Continuous average AoI is `sum(all recurrent ages)/(P*M) + 1/2`, computed with
-  `Fraction` and serialized as an exact rational string.
+  `Fraction` and serialized as an authoritative exact rational string plus
+  `continuous_average_aoi_decimal`, a JSON number rounded directly from that
+  fraction to six places. Bounds use the same `_decimal` convention. All
+  comparisons and Pareto decisions use exact values, never rounded decimals.
 - Continuous supremum peak AoI is `max(all recurrent ages) + 1`, an integer.
 
 Ages rise linearly between boundaries. Peak is the supremum before receptions,

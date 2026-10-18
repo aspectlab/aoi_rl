@@ -4,6 +4,7 @@ import sys
 
 import pytest
 from aoi.__main__ import main
+from aoi.schedules import schedule_entry
 
 
 GRAPH = {"num_nodes": 2, "edges": [[0, 1]]}
@@ -12,7 +13,7 @@ GRAPH = {"num_nodes": 2, "edges": [[0, 1]]}
 @pytest.mark.parametrize('source', ['edges', 'graph'])
 def test_algorithm_schedule_round_trip(tmp_path, capsys, source):
     graph = tmp_path/'graph.json'
-    graph.write_text(json.dumps({"num_nodes": 3, "edges": [[0, 1], [1, 2]]}))
+    graph.write_text(json.dumps({"graph": {"num_nodes": 3, "edges": [[0, 1], [1, 2]]}}))
     output = tmp_path/'schedule.json'
     args = ['--edges', '2-1,1-0'] if source == 'edges' else ['--graph', str(graph)]
     assert main(['algorithm1', *args, '--output', str(output)]) == 0
@@ -22,22 +23,22 @@ def test_algorithm_schedule_round_trip(tmp_path, capsys, source):
     assert json.dumps(expected).count('"graph"') == 1
     assert 'transient_actions' not in expected
     assert main(['evaluate', str(output)]) == 0
-    assert json.loads(capsys.readouterr().out) == expected
+    assert json.loads(capsys.readouterr().out) == {k: v for k, v in expected.items() if k != "bounds"}
     with pytest.raises(SystemExit):
         main(['algorithm1', '--graph', str(graph), '--output', str(output)])
 
 
 def test_evaluation_limit_json(tmp_path, capsys):
     graph, schedule = tmp_path/'graph.json', tmp_path/'word.json'
-    graph.write_text(json.dumps(GRAPH))
+    graph.write_text(json.dumps({"graph": GRAPH}))
     schedule.write_text(json.dumps({'cycle_actions': [[0, 0]]}))
     assert main(['evaluate', str(schedule), '--graph', str(graph), '--max-repetitions', '2']) == 2
-    assert json.loads(capsys.readouterr().out) == {'graph': GRAPH, 'status': 'evaluation_limit'}
+    assert json.loads(capsys.readouterr().out) == {'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit'}
 
 
 def test_learned_json_can_be_evaluated_without_its_transient(tmp_path, capsys):
     graph, schedule = tmp_path/'graph.json', tmp_path/'learned.json'
-    graph.write_text(json.dumps(GRAPH))
+    graph.write_text(json.dumps({"graph": GRAPH}))
     from aoi.env import AoIEnv
     from aoi.policy_eval import evaluate_policy
     class Oldest:
@@ -47,7 +48,7 @@ def test_learned_json_can_be_evaluated_without_its_transient(tmp_path, capsys):
     schedule.write_text(json.dumps(result.to_dict()))
     assert main(['evaluate', str(schedule), '--graph', str(graph)]) == 0
     output = json.loads(capsys.readouterr().out)
-    assert output == {"graph": GRAPH, **result.schedule.to_dict()}
+    assert output == {"graph": GRAPH, "schedules": [schedule_entry(result.schedule, "evaluation")]}
     assert 'transient_actions' not in output
 
 
@@ -63,7 +64,7 @@ def test_module_entrypoint():
 @pytest.mark.parametrize('restricted', [False, True])
 def test_training_command_writes_one_file(tmp_path, capsys, algorithm, restricted, source):
     graph, output = tmp_path/'graph.json', tmp_path/'result.json'
-    graph.write_text(json.dumps(GRAPH))
+    graph.write_text(json.dumps({"graph": GRAPH}))
     graph_args = ['--edges', '1-0'] if source == 'edges' else ['--graph', str(graph)]
     args = ['train', *graph_args, '--algorithm', algorithm, '--timesteps', '8',
             '--output', str(output), '--eval-steps', '20', '--validation-every', '0']
@@ -73,13 +74,13 @@ def test_training_command_writes_one_file(tmp_path, capsys, algorithm, restricte
     result = json.loads(capsys.readouterr().out)
     assert result['graph'] == GRAPH
     assert json.dumps(result).count('"graph"') == 1
-    assert code == (0 if result['status'] == 'cycle' else 2)
+    assert code == (0 if result['schedules'] else 2)
     if code == 0:
         assert main(['evaluate', str(output)]) == 0
         replay = json.loads(capsys.readouterr().out)
-        assert replay == {'graph': GRAPH, 'status': 'cycle', **result['best_average']}
+        assert replay == {'graph': GRAPH, 'schedules': [result['schedules'][0]]}
     else:
-        assert result == {'graph': GRAPH, 'status': 'evaluation_limit'}
+        assert result == {'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit'}
     assert json.loads(output.read_text()) == result
     assert set(tmp_path.iterdir()) == {graph, output}
 
@@ -103,7 +104,7 @@ def test_empty_graph_file_reports_input_error(tmp_path):
     ('--average-window', 'oops')])
 def test_invalid_training_numbers(tmp_path, capsys, option, value):
     graph, output = tmp_path/'graph.json', tmp_path/'result.json'
-    graph.write_text(json.dumps(GRAPH))
+    graph.write_text(json.dumps({"graph": GRAPH}))
     with pytest.raises(SystemExit) as exc:
         main(['train', '--graph', str(graph), '--output', str(output), option, value])
     assert exc.value.code == 2
@@ -114,9 +115,8 @@ def test_invalid_training_numbers(tmp_path, capsys, option, value):
 @pytest.mark.parametrize('index', ['-1', '1', 'no'])
 def test_invalid_schedule_index(tmp_path, capsys, index):
     graph, schedule = tmp_path/'graph.json', tmp_path/'schedule.json'
-    graph.write_text(json.dumps(GRAPH))
-    schedule.write_text(json.dumps({'status': 'cycle', 'best_average': {
-        'cycle_actions': [[0, 0], [1, 1]]}, 'alternatives': []}))
+    graph.write_text(json.dumps({"graph": GRAPH}))
+    schedule.write_text(json.dumps({'graph': GRAPH, 'schedules': [{'cycle_actions': [[0, 0], [1, 1]]}]}))
     with pytest.raises(SystemExit) as exc:
         main(['evaluate', str(schedule), '--graph', str(graph), '--schedule-index', index])
     assert exc.value.code == 2
@@ -138,18 +138,18 @@ def test_training_frontier_json_independent_replay(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(importlib.import_module('aoi.train'), 'evaluate_policy',
                         lambda *args, **kwargs: PolicyResult(next(discoveries)))
     graph, output = tmp_path/'graph.json', tmp_path/'result.json'
-    graph.write_text(json.dumps(GRAPH))
+    graph.write_text(json.dumps({"graph": GRAPH}))
     result = train(adjacency, output, timesteps=8, validation_every=4,
                    algorithm_options={'n_steps': 8, 'batch_size': 4, 'n_epochs': 1})
     assert result.schedules == verified[:2]
     data = json.loads(output.read_text())
     assert 'transient' not in output.read_text()
-    assert len(data['alternatives']) == 1
+    assert len(data['schedules']) == 2
     for index, expected in enumerate(verified[:2]):
         assert main(['evaluate', str(output), '--schedule-index', str(index)]) == 0
-        assert json.loads(capsys.readouterr().out) == {"graph": GRAPH, **expected.to_dict()}
+        assert json.loads(capsys.readouterr().out) == {"graph": GRAPH, "schedules": [schedule_entry(expected, "ppo")]}
     assert main(['evaluate', str(output)]) == 0
-    assert json.loads(capsys.readouterr().out) == {"graph": GRAPH, **verified[0].to_dict()}
+    assert json.loads(capsys.readouterr().out) == {"graph": GRAPH, "schedules": [schedule_entry(verified[0], "ppo")]}
     assert set(tmp_path.iterdir()) == {graph, output}
 
 
@@ -167,19 +167,19 @@ def test_graph_input_cli_errors(command, args, capsys):
 @pytest.mark.parametrize('embedded', [False, True])
 def test_external_graph_and_independent_metrics(tmp_path, capsys, source, embedded):
     schedule, graph = tmp_path/'schedule.json', tmp_path/'graph.json'
-    graph.write_text(json.dumps({'num_nodes': 2, 'edges': [[1, 0]]}))
+    graph.write_text(json.dumps({'graph': {'num_nodes': 2, 'edges': [[1, 0]]}}))
     data = {'cycle_actions': [[0, 0], [1, 1]], 'period': 999,
             'continuous_average_aoi': '999', 'continuous_peak_aoi': 999}
     if embedded:
-        data['graph'] = GRAPH
+        data = {'graph': GRAPH, 'schedules': [data]}
     schedule.write_text(json.dumps(data))
     args = ['--edges', '1-0'] if source == 'edges' else ['--graph', str(graph)]
     output = tmp_path/'evaluated.json'
     assert main(['evaluate', str(schedule), *args, '--output', str(output)]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result == {'graph': GRAPH, 'status': 'cycle',
+    assert result == {'graph': GRAPH, 'schedules': [{'method': 'evaluation',
                       'cycle_actions': [[0, 0], [1, 1]], 'period': 2,
-                      'continuous_average_aoi': '2', 'continuous_peak_aoi': 3}
+                      'continuous_average_aoi': '2', 'continuous_average_aoi_decimal': 2.0, 'continuous_peak_aoi': 3}]}
     assert json.loads(output.read_text()) == result
 
 
@@ -196,14 +196,15 @@ def test_mismatched_graphs_rejected(tmp_path, capsys, external):
 
 @pytest.mark.parametrize('data, args, message', [
     ({'cycle_actions': [[0, 0]]}, [], 'no embedded graph'),
-    ({'graph': GRAPH, 'status': 'evaluation_limit'}, [], 'no verified schedule'),
-    ({'graph': GRAPH, 'cycle_actions': [[0, 0]]}, ['--schedule-index', '1'], 'out of range'),
-    ({'graph': GRAPH, 'best_average': {'cycle_actions': [[0, 0]]}, 'alternatives': {}}, [], 'alternatives'),
-    ({'graph': GRAPH, 'best_average': None}, [], 'cycle_actions'),
-    ({'graph': GRAPH, 'best_average': {}, 'cycle_actions': []}, [], 'both'),
+    ({'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit'}, [], 'no verified schedule'),
+    ({'graph': GRAPH, 'schedules': [{'cycle_actions': [[0, 0]]}]}, ['--schedule-index', '1'], 'out of range'),
+    ({'graph': GRAPH, 'schedules': {}}, [], 'must be a list'),
+    ({'graph': GRAPH, 'schedules': [None]}, [], 'cycle_actions'),
+    ({'graph': GRAPH, 'best_average': {}}, [], 'no verified schedule'),
+    ({'schedules': []}, ['--edges', '0-1'], 'graph field'),
     ({'graph': None, 'cycle_actions': []}, ['--edges', '0-1'], 'Graph must'),
     ({'cycle_actions': []}, ['--edges', '0-1', '--graph', 'unused.json'], 'not allowed'),
-    ({'graph': GRAPH, 'cycle_actions': [[True, 0]]}, [], 'integer'),
+    ({'graph': GRAPH, 'schedules': [{'cycle_actions': [[True, 0]]}]}, [], 'integer'),
 ])
 def test_evaluation_input_errors(tmp_path, capsys, data, args, message):
     path = tmp_path/'schedule.json'
@@ -219,10 +220,10 @@ def test_frontier_metrics_are_not_trusted(tmp_path, capsys):
     entry = {'cycle_actions': [[0, 0], [1, 1]], 'period': -1,
              'continuous_average_aoi': 'wrong', 'continuous_peak_aoi': 100}
     path.write_text(json.dumps({'graph': GRAPH, 'status': 'cycle',
-                               'best_average': entry, 'alternatives': [entry]}))
+                               'schedules': [entry, entry]}))
     for args in [[], ['--schedule-index', '1']]:
         assert main(['evaluate', str(path), *args]) == 0
-        result = json.loads(capsys.readouterr().out)
+        result = json.loads(capsys.readouterr().out)['schedules'][0]
         assert result['period'] == 2
         assert result['continuous_average_aoi'] == '2'
         assert result['continuous_peak_aoi'] == 3
@@ -235,7 +236,76 @@ def test_training_failure_embeds_graph(tmp_path, capsys, algorithm):
                  '--timesteps', '8', '--eval-steps', '1', '--validation-every', '0',
                  '--output', str(output)]) == 2
     assert json.loads(capsys.readouterr().out) == json.loads(output.read_text()) == {
-        'graph': GRAPH, 'status': 'evaluation_limit'}
+        'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit'}
     with pytest.raises(SystemExit):
         main(['evaluate', str(output)])
     assert 'no verified schedule' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('source', ['graph', 'algorithm1', 'ppo', 'dqn', 'evaluation'])
+def test_graph_reuse_only_reads_graph(tmp_path, monkeypatch, capsys, source):
+    import importlib
+    from aoi.policy_eval import PolicyResult
+    from aoi.schedules import evaluate_schedule
+    from aoi.graphs import read_graph
+    import numpy as np
+
+    adjacency = [[0, 1], [1, 0]]
+    verified = evaluate_schedule(adjacency, [(0, 0), (1, 1)])
+    data = {'graph': {'num_nodes': 2, 'edges': [[1, 0]]}}
+    if source != 'graph':
+        data.update(bounds={'old_bound': '999'}, schedules=[schedule_entry(verified, source)])
+    path = tmp_path / 'input.json'
+    path.write_text(json.dumps(data))
+    original = path.read_bytes()
+    np.testing.assert_array_equal(read_graph(path), adjacency)
+    monkeypatch.setattr(importlib.import_module('aoi.train'), 'evaluate_policy',
+                        lambda *a, **kw: PolicyResult(verified))
+    for seed in (0, 1):
+        output = tmp_path / f'run{seed}.json'
+        assert main(['train', '--graph', str(path), '--algorithm', 'dqn', '--seed', str(seed),
+                     '--timesteps', '8', '--validation-every', '0', '--output', str(output)]) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result == {'graph': GRAPH, 'schedules': [schedule_entry(verified, 'dqn')]}
+        assert json.loads(output.read_text()) == result
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize('command', ['algorithm1', 'train', 'evaluate'])
+@pytest.mark.parametrize('collision', [False, True])
+def test_no_output_overwrite_even_on_failure(tmp_path, capsys, command, collision):
+    source = tmp_path / 'input.json'
+    source.write_text(json.dumps({'graph': GRAPH, 'schedules': [{'cycle_actions': [[0, 0]]}]}))
+    output = source if collision else tmp_path / 'existing.json'
+    if not collision:
+        output.write_text('prior results\n')
+    original = output.read_bytes()
+    args = [str(source), '--max-repetitions', '1'] if command == 'evaluate' else ['--graph', str(source)]
+    with pytest.raises(SystemExit) as exc:
+        main([command, *args, '--output', str(output)])
+    assert exc.value.code == 2
+    assert 'already exists' in capsys.readouterr().err
+    assert output.read_bytes() == original
+
+
+@pytest.mark.parametrize('data', [{}, GRAPH, {'schedules': []}, {'graph': None}])
+def test_unified_graph_is_required(tmp_path, data):
+    from aoi.graphs import read_graph
+    path = tmp_path / 'invalid.json'
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match='[Gg]raph'):
+        read_graph(path)
+
+
+def test_decimal_first_terminal_summary(tmp_path, capsys):
+    output = tmp_path / 'p3.json'
+    assert main(['algorithm1', '--edges', '0-1,1-2', '--output', str(output)]) == 0
+    captured = capsys.readouterr()
+    assert 'Average AoI: 3.833333 (23/6)' in captured.err
+    assert 'average_lower_tstar_periodic: 3.833333 (23/6)' in captured.err
+    assert 'average_upper_algorithm1: 4.166667 (25/6)' in captured.err
+    assert main(['evaluate', str(output)]) == 0
+    captured = capsys.readouterr()
+    assert 'Average AoI: 3.833333 (23/6)' in captured.err
+    entry = json.loads(captured.out)['schedules'][0]
+    assert entry['continuous_average_aoi_decimal'] == 3.833333

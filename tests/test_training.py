@@ -209,21 +209,21 @@ def test_guaranteed_training_json_schedule_round_trip(tmp_path, monkeypatch, cap
                        **options(algorithm), 'learning_rate': 0, **exploration,
                        'policy_kwargs': {'net_arch': []}})
     from aoi.__main__ import read_schedule
-    assert read_schedule(output) == json.loads(output.read_text())['best_average']['cycle_actions']
+    assert read_schedule(output) == json.loads(output.read_text())['schedules'][0]['cycle_actions']
     assert models[0]._n_updates == (1 if algorithm == 'ppo' else 8)
     data = json.loads(output.read_text())
     assert data == result.to_dict() == {
         'graph': {'num_nodes': 2, 'edges': [[0, 1]]},
-        'status': 'cycle', 'best_average': {
+        'schedules': [{'method': algorithm,
             'cycle_actions': [[1, 1], [0, 0]], 'period': 2,
-            'continuous_average_aoi': '2', 'continuous_peak_aoi': 3},
-        'alternatives': []}
-    replay = evaluate_schedule(adjacency, data['best_average']['cycle_actions'])
+            'continuous_average_aoi': '2', 'continuous_average_aoi_decimal': 2.0,
+            'continuous_peak_aoi': 3}]}
+    replay = evaluate_schedule(adjacency, data['schedules'][0]['cycle_actions'])
     assert replay.metrics == result.schedules[0].metrics
-    assert replay.to_dict() == {'status': 'cycle', **data['best_average']}
+    assert replay.to_dict() == {'status': 'cycle', **{k: v for k, v in data['schedules'][0].items() if k != 'method'}}
     from aoi.__main__ import main
     assert main(['evaluate', str(output)]) == 0
-    assert json.loads(capsys.readouterr().out) == {'graph': data['graph'], **replay.to_dict()}
+    assert json.loads(capsys.readouterr().out) == data
 
 
 def test_deterministic_validation_preserves_training_rng_state():
@@ -274,7 +274,7 @@ def test_exact_frontier_pruning_order_and_deduplication():
     assert result.schedules[-1].metrics.continuous_average_aoi == Fraction('15.9')
     result.insert(synthetic('14', 30), Fraction(1))
     assert result.schedules == [synthetic('14', 30)]
-    assert len(result.to_dict()['alternatives']) == 0
+    assert len(result.to_dict()['schedules']) == 1
 
 
 def test_zero_window_equal_average_lower_peak():
@@ -339,7 +339,7 @@ def test_validation_follows_final_optimizer_update(tmp_path, monkeypatch):
 def test_default_validation_and_honest_failure():
     callback = ScheduleFrontier(lambda: AoIEnv([[0, 1], [1, 0]]))
     assert callback.every == 25_000
-    assert callback.result.to_dict() == {'status': 'evaluation_limit'}
+    assert callback.result.to_dict() == {'graph': None, 'schedules': [], 'status': 'evaluation_limit'}
 
 
 @pytest.mark.parametrize('restricted', [False, True])

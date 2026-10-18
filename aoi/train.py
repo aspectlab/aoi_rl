@@ -1,5 +1,4 @@
 """Continuing PPO/DQN training with a small exact schedule frontier."""
-import json
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -12,10 +11,10 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from .blocks import ConnectedBlockEnv
 from .env import AoIEnv
-from .graphs import graph_to_dict
+from .graphs import graph_to_dict, write_json
 from .policies import MaskedActorCriticPolicy, MaskedDQN
 from .policy_eval import evaluate_policy
-from .schedules import ScheduleResult, positive_integer
+from .schedules import ScheduleResult, positive_integer, schedule_entry
 
 
 def parse_reward_divisor(value):
@@ -66,6 +65,7 @@ class TrainingResult:
 
     schedules: list[ScheduleResult] = field(default_factory=list)
     graph: dict | None = None
+    method: str = "ppo"
 
     @property
     def status(self):
@@ -92,12 +92,11 @@ class TrainingResult:
         self.schedules.sort(key=metric_point)
 
     def to_dict(self):
-        graph = {"graph": self.graph} if self.graph is not None else {}
+        data = {"graph": self.graph,
+                "schedules": [schedule_entry(s, self.method) for s in self.schedules]}
         if not self.schedules:
-            return {**graph, "status": self.status}
-        words = [{"cycle_actions": [list(a) for a in s.actions], **s.metrics.to_dict()}
-                 for s in self.schedules]
-        return {**graph, "status": self.status, "best_average": words[0], "alternatives": words[1:]}
+            data["status"] = self.status
+        return data
 
 
 def make_model(env, *, algorithm="ppo", connected_block=False, gamma=0.999,
@@ -183,13 +182,13 @@ def train(adjacency, output="result.json", *, algorithm="ppo", connected_block=F
         callback = ScheduleFrontier(lambda: env_type(env.model.adjacency),
                                     validation_every=validation_every, max_steps=max_steps,
                                     average_window=average_window)
+        callback.result.method = algorithm
         callback.result.graph = graph_to_dict(env.model.adjacency)
         model = make_model(env, algorithm=algorithm, connected_block=connected_block,
                            gamma=gamma, seed=seed, device=device, reward_divisor=reward_divisor,
                            **(algorithm_options or {}))
         model.learn(total_timesteps=timesteps, callback=callback)
-        with output.open("x") as stream:
-            stream.write(json.dumps(callback.result.to_dict(), indent=2, allow_nan=False) + "\n")
+        write_json(callback.result.to_dict(), output)
         return callback.result
     finally:
         env.close()

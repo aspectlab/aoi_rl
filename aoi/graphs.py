@@ -78,4 +78,18 @@ def read_json(path):
 
 
 def read_graph(path):
-    return graph_from_dict(read_json(path))
+    return graph_from_document(read_json(path))
+
+
+def graph_from_document(data):
+    """Read only the required graph; previous bounds and schedules are ignored."""
+    if not isinstance(data, dict) or "graph" not in data:
+        raise ValueError("Unified JSON document must contain a graph field.")
+    return graph_from_dict(data["graph"])
+
+
+def write_json(data, path):
+    """Create a new JSON file exclusively; never truncate an existing result."""
+    text = json.dumps(data, indent=2, allow_nan=False) + "\n"
+    with Path(path).open("x") as stream:
+        stream.write(text)

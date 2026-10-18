@@ -44,6 +44,7 @@ class CycleMetrics:
     def to_dict(self):
         return {"period": self.period,
                 "continuous_average_aoi": str(self.continuous_average_aoi),
+                "continuous_average_aoi_decimal": float(round(self.continuous_average_aoi, 6)),
                 "continuous_peak_aoi": self.continuous_peak_aoi}
 
 
@@ -120,3 +121,9 @@ def evaluate_schedule(adjacency, actions, *, max_repetitions: int = 1000) -> Sch
     if not (state == boundary).all():
         raise RuntimeError("Recurrent word evaluation failed exact closure.")
     return ScheduleResult(word, cycle_metrics(total, peak, repetitions * len(word), model.n))
+
+
+def schedule_entry(schedule, method):
+    """Serialize a complete verified word, with decimals derived from exact metrics."""
+    return {"method": method, "cycle_actions": [list(a) for a in schedule.actions],
+            **schedule.metrics.to_dict()}

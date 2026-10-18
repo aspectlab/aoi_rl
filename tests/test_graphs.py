@@ -15,7 +15,7 @@ def test_graph_inputs_and_canonical_round_trip(graph, tmp_path):
     data = {'num_nodes': len(graph), 'edges': edges}
     inline = ' , '.join(f' {u} - {v} ' for u, v in edges)
     path = tmp_path/'graph.json'
-    path.write_text(json.dumps(data))
+    path.write_text(json.dumps({"graph": data}))
     for actual in [parse_edges(inline), graph_from_dict(data), read_graph(path)]:
         np.testing.assert_array_equal(actual, adjacency)
         canonical = graph_to_dict(actual)

@@ -1,6 +1,7 @@
 """Algorithm 1: source-containing minimum connected dominating sets and DFS."""
 from dataclasses import dataclass
 from itertools import combinations
+from fractions import Fraction
 
 import networkx as nx
 
@@ -69,3 +70,28 @@ def algorithm1_schedule(adjacency) -> Algorithm1Result:
     if len(actions) != n * len(first) + len(pseudoleaves):
         raise RuntimeError("Algorithm 1 word does not have length T*.")
     return Algorithm1Result(tuple(actions), len(first), pseudoleaves)
+
+
+def mean_shortest_path_distance(adjacency):
+    """Exact distance averaged over ordered pairs of distinct labeled vertices."""
+    graph = nx.from_numpy_array(validate_adjacency(adjacency))
+    total = sum(sum(distances.values())
+                for _, distances in nx.all_pairs_shortest_path_length(graph))
+    return Fraction(total, len(graph) * (len(graph) - 1))
+
+
+def average_age_bounds(adjacency, construction):
+    """Farazi–Klein–Brown (2019), Theorems 4/5, equations (15)/(16).
+
+    The lower bound applies to T*-periodic schedules updating all statuses;
+    the upper bound applies to Algorithm 1's constructed schedule. Neither is
+    an optimality certificate for arbitrary-period learned schedules. Reuse the
+    exact MCDS/pseudoleaf result for this adjacency; no schedule metrics enter.
+    """
+    n = len(adjacency)
+    t_star = n * construction.gamma_c + len(construction.pseudoleaves)
+    return {
+        "average_lower_tstar_periodic": Fraction(t_star, 2) + mean_shortest_path_distance(adjacency),
+        "average_upper_algorithm1": Fraction(t_star, 2) + construction.gamma_c
+                                    + Fraction(len(construction.pseudoleaves), n),
+    }
