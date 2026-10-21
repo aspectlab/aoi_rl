@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 from aoi.env import AoIEnv
-from aoi.blocks import ConnectedBlockEnv
 from aoi.policy_eval import PolicyResult, evaluate_policy
 from aoi.schedules import ScheduleResult, evaluate_schedule
 
@@ -12,10 +11,9 @@ class OldestSource:
         return (0 if obs[1] >= obs[0] else 3), None
 
 
-@pytest.mark.parametrize('env_type', [AoIEnv, ConnectedBlockEnv])
-def test_exact_transient_cycle_and_replay_from_initialization(env_type):
+def test_exact_transient_cycle_and_replay_from_initialization():
     a = [[0, 1], [1, 0]]
-    result = evaluate_policy(OldestSource(), env_type(a), max_steps=20)
+    result = evaluate_policy(OldestSource(), AoIEnv(a), max_steps=20)
     assert result.status == 'cycle'
     assert result.transient_actions == ((0, 0),)
     assert result.schedule.actions == ((1, 1), (0, 0))
@@ -23,8 +21,8 @@ def test_exact_transient_cycle_and_replay_from_initialization(env_type):
     assert result.schedule.metrics.continuous_average_aoi == 2
     assert result.schedule.metrics.continuous_peak_aoi == 3
     assert result.to_dict()['transient_length'] == len(result.transient_actions)
-    assert evaluate_policy(OldestSource(), env_type(a), max_steps=result.steps_examined) == result
-    env = env_type(a)
+    assert evaluate_policy(OldestSource(), AoIEnv(a), max_steps=result.steps_examined) == result
+    env = AoIEnv(a)
     for pair in result.transient_actions:
         env.step(env.action_index(pair))
     boundary = env.state_key()

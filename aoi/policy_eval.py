@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .blocks import ConnectedBlockEnv, is_cyclic_block_schedule
+from .observations import PolicyObservation
 from .schedules import (EvaluationLimit, ScheduleResult, cycle_metrics,
                         evaluate_schedule, positive_integer)
 
@@ -37,8 +37,9 @@ def evaluate_policy(model, env, *, max_steps=50_000) -> PolicyResult:
     ----------
     model : object with predict(obs, deterministic=True)
         Frozen, stationary, memoryless policy; hidden recurrent state is unsupported.
-    env : AoIEnv or ConnectedBlockEnv
-        Continuing evaluation environment; this call resets and advances it.
+    env : AoIEnv
+        Separate physical evaluation environment; this call resets and advances it.
+        Models from make_model supply their own scaling and mask settings.
     max_steps : int
         Positive controlled-trajectory budget, also used as replay repetition budget.
 
@@ -50,36 +51,38 @@ def evaluate_policy(model, env, *, max_steps=50_000) -> PolicyResult:
         a verified cycle certifies this trajectory, not global optimality.
     """
     positive_integer(max_steps, "max_steps")
+    physical = env.unwrapped
+    configuration = getattr(model, "aoi_training", None)
+    if configuration is not None:
+        env = PolicyObservation(physical, configuration["observation_divisor"],
+                                progress_mask=configuration["progress_mask"])
     obs, _ = env.reset()
     seen, actions, totals, peaks = {}, [], [], []
     for t in range(max_steps + 1):
         # A fixed policy supplies the next action, so no external word phase is
-        # needed. All physical ages AND block memory must recur: equal rewards,
+        # needed. All exact physical ages must recur: equal rewards,
         # actions, or rounded float observations do not determine the same future.
-        key = env.state_key()
+        key = physical.state_key()
         if key in seen:
             start = seen[key]
             word = tuple(actions[start:])
-            measured = cycle_metrics(sum(totals[start:]), max(peaks[start:]), len(word), env.n)
+            measured = cycle_metrics(sum(totals[start:]), max(peaks[start:]), len(word), physical.n)
             try:
-                replay = evaluate_schedule(env.model.adjacency, word, max_repetitions=max_steps)
+                replay = evaluate_schedule(physical.model.adjacency, word, max_repetitions=max_steps)
             except EvaluationLimit:
                 return PolicyResult(None, steps_examined=t)
             if (replay.metrics.continuous_average_aoi != measured.continuous_average_aoi
                     or replay.metrics.continuous_peak_aoi != measured.continuous_peak_aoi):
                 raise RuntimeError("Exported word disagrees with policy-cycle metrics.")
-            if (isinstance(env, ConnectedBlockEnv)
-                    and not is_cyclic_block_schedule(env.model.adjacency, word)):
-                raise RuntimeError("Exported word violates cyclic block legality.")
             return PolicyResult(ScheduleResult(word, replay.metrics), tuple(actions[:start]), t)
         if t == max_steps:
             break
         seen[key] = t
         action, _ = model.predict(obs, deterministic=True)
         action = np.asarray(action).item()
-        actions.append(env.action_pair(action))
-        totals.append(sum(map(int, env.state)))
-        peaks.append(int(env.state.max()))
+        actions.append(physical.action_pair(action))
+        totals.append(sum(map(int, physical.state)))
+        peaks.append(int(physical.state.max()))
         obs, _, terminated, truncated, _ = env.step(action)
         if terminated or truncated:
             raise RuntimeError("Policy evaluation requires a continuing environment.")

@@ -68,8 +68,10 @@ def main(argv=None):
         command.add_argument("--max-repetitions", type=int, default=1000)
     command = commands.add_parser("train", help="Train PPO or DQN and save verified schedule tradeoffs.")
     add_graph_arguments(command, required=True)
-    command.add_argument("--algorithm", choices=("ppo", "dqn"), default="ppo")
-    command.add_argument("--connected-block", action="store_true")
+    command.add_argument("--algorithm", choices=("ppo", "dqn"), default="ppo",
+                         help="Training algorithm (default ppo).")
+    command.add_argument("--progress-mask", action="store_true",
+                         help="Exclude relays without physical progress (default off).")
     command.add_argument("--output", type=Path, default=Path("result.json"))
     command.add_argument("--timesteps", type=int, default=1_000_000)
     command.add_argument("--seed", type=int, default=0)
@@ -77,6 +79,7 @@ def main(argv=None):
     command.add_argument("--validation-every", type=int, default=25_000,
                          help="Validation cadence; 0 means final validation only.")
     command.add_argument("--reward-divisor", help="Positive training divisor; default N*diameter(G).")
+    command.add_argument("--observation-divisor", help="Positive observation divisor; default N*diameter(G).")
     command.add_argument("--average-window", default="1",
                          help="Nonnegative exact average-AoI window (default 1).")
     command.add_argument("--eval-steps", type=int, default=50_000)
@@ -101,10 +104,11 @@ def main(argv=None):
         if args.command == "train":
             from .train import train
             result = train(adjacency, args.output, algorithm=args.algorithm,
-                connected_block=args.connected_block, timesteps=args.timesteps,
+                progress_mask=args.progress_mask, timesteps=args.timesteps,
                 seed=args.seed, gamma=args.gamma, validation_every=args.validation_every,
                 max_steps=args.eval_steps, device=args.device,
-                reward_divisor=args.reward_divisor, average_window=args.average_window)
+                reward_divisor=args.reward_divisor, observation_divisor=args.observation_divisor,
+                average_window=args.average_window)
             emit(result.to_dict())
             return 0 if result.schedules else 2
         bounds = None

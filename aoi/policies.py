@@ -1,55 +1,53 @@
-"""SB3 policies that apply connected-block masks throughout learning."""
-import math
-
+"""Focused SB3 support for exact physical-progress masks."""
 import numpy as np
 import torch
 from stable_baselines3 import DQN
 from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.dqn.policies import DQNPolicy, QNetwork
 
 
-def observation_mask(obs, n):
-    """Reconstruct legality from stored one-hot source and holder bits."""
-    active = obs[..., -2*n:-n] > 0.5
-    holders = obs[..., -n:] > 0.5
-    return (torch.eye(n, dtype=torch.bool, device=obs.device)
-            | (holders.unsqueeze(-1) & active.unsqueeze(-2))).flatten(-2)
+class AgesOnly(BaseFeaturesExtractor):
+    """Exclude auxiliary mask metadata from both actor/critic and Q features."""
+
+    def __init__(self, observation_space):
+        super().__init__(observation_space, observation_space["ages"].shape[0])
+
+    def forward(self, obs):
+        return obs["ages"]
 
 
 class MaskedQNetwork(QNetwork):
     def forward(self, obs):
         q = super().forward(obs)
-        # Used by BOTH networks: illegal actions must not win greedy prediction
-        # or the successor-state max in Bellman targets, even with large raw Q.
-        return q.masked_fill(~observation_mask(obs, math.isqrt(self.action_space.n)), -torch.inf)
+        # SB3's standard DQN uses this same forward path for greedy selection
+        # and target-network maximization. Replay supplies the NEXT state's
+        # exact mask, including terminal observations handled by SB3 itself.
+        return q.masked_fill(~obs["mask"].bool(), -torch.inf)
 
 
 class MaskedDQNPolicy(DQNPolicy):
+    def __init__(self, *args, **kwargs):
+        kwargs["features_extractor_class"] = AgesOnly
+        super().__init__(*args, **kwargs)
+
     def make_q_net(self):
         args = self._update_features_extractor(self.net_args, features_extractor=None)
         return MaskedQNetwork(**args).to(self.device)
 
 
 class MaskedDQN(DQN):
-    """Legal warmup/exploration, with masked online and target Q networks."""
+    """Uniform legal exploration; unchanged SB3 Bellman loss and target schedule.
 
-    def __init__(self, policy, env, **kwargs):
-        if policy == "MlpPolicy":
-            policy = MaskedDQNPolicy
-        super().__init__(policy, env, **kwargs)
-        if not issubclass(self.policy_class, MaskedDQNPolicy):
-            raise ValueError("MaskedDQN requires MaskedDQNPolicy.")
+    DictReplayBuffer stores current and next masks as one-byte entries, alongside
+    the corresponding ages. No exact physical states are duplicated in replay.
+    """
 
     def _random_legal(self, observation):
-        # Random warmup and epsilon exploration bypass greedy Q selection, so
-        # they need their own mask. Stored memory also makes replay masks valid.
-        obs = np.asarray(observation)
-        n = math.isqrt(self.action_space.n)
-        active, holders = obs[..., -2*n:-n] > 0.5, obs[..., -n:] > 0.5
-        mask = (np.eye(n, dtype=bool)
-                | (holders[..., :, None] & active[..., None, :])).reshape(-1, n*n)
-        actions = np.array([np.random.choice(np.flatnonzero(row)) for row in mask])
-        return actions if obs.ndim > 1 else actions[0]
+        mask = np.asarray(observation["mask"], dtype=bool)
+        actions = np.array([np.random.choice(np.flatnonzero(row))
+                            for row in mask.reshape(-1, self.action_space.n)])
+        return actions if mask.ndim > 1 else actions[0]
 
     def predict(self, observation, state=None, episode_start=None, deterministic=False):
         if not deterministic and np.random.rand() < self.exploration_rate:
@@ -64,7 +62,11 @@ class MaskedDQN(DQN):
 
 
 class MaskedActorCriticPolicy(ActorCriticPolicy):
-    """Use identical masks for PPO sampling, inference, likelihood, and entropy."""
+    """Use buffered exact support for sampling, likelihood, entropy and updates."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs["features_extractor_class"] = AgesOnly
+        super().__init__(*args, **kwargs)
 
     def _latents(self, obs):
         features = self.extract_features(obs)
@@ -74,12 +76,9 @@ class MaskedActorCriticPolicy(ActorCriticPolicy):
         return self.mlp_extractor.forward_actor(actor), self.mlp_extractor.forward_critic(critic)
 
     def _distribution(self, obs, latent):
-        # PPO must recompute the same masked support for rollout likelihoods and
-        # update-time ratios/entropy; masking only sampled actions changes the loss.
         logits = self.action_net(latent)
-        mask = observation_mask(obs, math.isqrt(self.action_space.n))
         # A finite sentinel prevents undefined entropy gradients from zero * -inf.
-        logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
+        logits = logits.masked_fill(~obs["mask"].bool(), torch.finfo(logits.dtype).min)
         return self.action_dist.proba_distribution(action_logits=logits)
 
     def forward(self, obs, deterministic=False):

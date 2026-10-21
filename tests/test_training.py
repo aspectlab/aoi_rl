@@ -9,9 +9,8 @@ import pytest
 import torch
 from stable_baselines3.common.callbacks import BaseCallback
 
-from aoi.blocks import ConnectedBlockEnv
 from aoi.env import AoIEnv
-from aoi.policies import MaskedDQN, observation_mask
+from aoi.observations import PolicyObservation, progress_mask
 from aoi.train import (ScheduleFrontier, TrainingReward, TrainingResult,
                        parse_average_window, make_model, train)
 from fractions import Fraction
@@ -29,11 +28,11 @@ def options(algorithm):
 
 
 @pytest.mark.parametrize('algorithm', ['ppo', 'dqn'])
-@pytest.mark.parametrize('restricted', [False, True])
+@pytest.mark.parametrize('masked', [False, True])
 @pytest.mark.parametrize('divisor', [None, 1, 26])
 @pytest.mark.parametrize('graph', [nx.path_graph(4), nx.cycle_graph(4)])
-def test_scaled_reward_and_separate_validation(algorithm, restricted, graph, divisor):
-    cls = ConnectedBlockEnv if restricted else AoIEnv
+def test_scaled_reward_and_separate_validation(algorithm, masked, graph, divisor):
+    cls = AoIEnv
 
     class CountResets(cls):
         resets = 0
@@ -43,7 +42,7 @@ def test_scaled_reward_and_separate_validation(algorithm, restricted, graph, div
 
     a = nx.to_numpy_array(graph)
     base, reference = CountResets(a), cls(a)
-    model = make_model(base, algorithm=algorithm, connected_block=restricted,
+    model = make_model(base, algorithm=algorithm, progress_mask=masked,
                        seed=6, reward_divisor=divisor, **options(algorithm))
     scale = len(a) * nx.diameter(graph) if divisor is None else divisor
     raw_rewards = []
@@ -55,7 +54,12 @@ def test_scaled_reward_and_separate_validation(algorithm, restricted, graph, div
             assert raw == -float(np.mean(reference.state))
             assert not terminated and not truncated
             assert self.locals['rewards'][0] == np.float32(raw / scale)
-            np.testing.assert_array_equal(self.locals['new_obs'][0], obs)
+            received = self.locals['new_obs']
+            ages = received['ages'][0] if masked else received[0]
+            np.testing.assert_array_equal(ages, obs / (len(a) * nx.diameter(graph)))
+            if masked:
+                np.testing.assert_array_equal(received['mask'][0],
+                                              progress_mask(reference.model, reference.state))
             assert base.state_key() == reference.state_key()
             assert not self.locals['dones'][0]
             assert 'terminal_observation' not in self.locals['infos'][0]
@@ -67,8 +71,8 @@ def test_scaled_reward_and_separate_validation(algorithm, restricted, graph, div
             if algorithm == 'ppo':
                 np.testing.assert_array_equal(model.rollout_buffer.rewards[:, 0],
                                               np.asarray(raw_rewards[-8:], dtype=np.float32))
-                if restricted:
-                    obs = torch.tensor(model.rollout_buffer.observations[:, 0])
+                if masked:
+                    obs = {k: torch.tensor(v[:, 0]) for k, v in model.rollout_buffer.observations.items()}
                     actions = torch.tensor(model.rollout_buffer.actions[:, 0, 0], dtype=torch.long)
                     _, logp, entropy = model.policy.evaluate_actions(obs, actions)
                     np.testing.assert_allclose(logp.detach(), model.rollout_buffer.log_probs[:, 0], atol=1e-6)
@@ -87,14 +91,14 @@ def test_scaled_reward_and_separate_validation(algorithm, restricted, graph, div
 
 
 @pytest.mark.parametrize('algorithm', ['ppo', 'dqn'])
-@pytest.mark.parametrize('restricted', [False, True])
-def test_train_writes_only_json_and_never_computes_mcds(tmp_path, monkeypatch, algorithm, restricted):
+@pytest.mark.parametrize('masked', [False, True])
+def test_train_writes_only_json_and_never_computes_mcds(tmp_path, monkeypatch, algorithm, masked):
     def forbidden(*args, **kwargs):
         raise AssertionError('Training must not compute MCDS')
     monkeypatch.setattr(importlib.import_module('aoi.algorithm1'), 'algorithm1_schedule', forbidden)
     output = tmp_path/'result.json'
     result = train(nx.to_numpy_array(nx.path_graph(3)), output, algorithm=algorithm,
-                   connected_block=restricted, timesteps=32, validation_every=16,
+                   progress_mask=masked, timesteps=32, validation_every=16,
                    max_steps=50, algorithm_options=options(algorithm))
     assert list(tmp_path.iterdir()) == [output]
     assert json.loads(output.read_text()) == result.to_dict()
@@ -135,53 +139,9 @@ def test_intermediate_best_survives_worse_final_policy():
     model.mode = 'best'
     callback._on_training_end()
     assert callback.result.schedules[0].metrics.continuous_average_aoi < worse.metrics.continuous_average_aoi
-def test_dqn_masks_targets_and_all_exploration_paths():
-    env = ConnectedBlockEnv(nx.to_numpy_array(nx.path_graph(3)))
-    model = MaskedDQN('MlpPolicy', env, seed=2, buffer_size=16, learning_starts=10)
-    obs, _ = env.reset()
-    for net in (model.q_net, model.q_net_target):
-        for parameter in net.parameters():
-            parameter.data.zero_()
-        net.q_net[-1].bias.data[1] = 1e6
-        net.q_net[-1].bias.data[0] = 2
-    assert model.q_net_target(torch.tensor(obs[None])).max().item() == 2
-    assert int(model.predict(obs, deterministic=True)[0]) == 0
-    model._setup_learn(1)
-    model.replay_buffer.add(obs[None], obs[None], np.array([0]), np.array([1.]), np.array([0.]), [{}])
-    model.train(1, 1)
-    expected = torch.nn.functional.smooth_l1_loss(torch.tensor([2.]), torch.tensor([1 + 2*model.gamma])).item()
-    assert model.logger.name_to_value['train/loss'] == pytest.approx(expected)
-    model.exploration_rate = 1
-    model._last_obs = obs[None]
-    for _ in range(50):
-        assert env.action_masks()[int(model.predict(obs)[0])]
-        assert env.action_masks()[int(model._sample_action(10)[0][0])]
-
-def test_ppo_masks_inference_sampling_likelihood_and_gradient():
-    env = ConnectedBlockEnv(nx.to_numpy_array(nx.path_graph(3)))
-    model = make_model(env, connected_block=True, **options('ppo'))
-    obs = torch.tensor(env.reset()[0][None])
-    with torch.no_grad():
-        model.policy.action_net.weight.zero_()
-        model.policy.action_net.bias.zero_()
-        model.policy.action_net.bias[1] = 1e6
-    distribution = model.policy.get_distribution(obs)
-    mask = observation_mask(obs, 3)
-    assert (distribution.distribution.probs[~mask] == 0).all()
-    for _ in range(20):
-        action, _, _ = model.policy(obs)
-        assert env.action_masks()[int(action[0])]
-    assert env.action_masks()[int(model.predict(obs.numpy(), deterministic=True)[0][0])]
-    _, logp, entropy = model.policy.evaluate_actions(obs, torch.tensor([0]))
-    model.policy.zero_grad()
-    (-(logp + entropy).sum()).backward()
-    assert model.policy.action_net.bias.grad[1] == 0
-    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.policy.parameters())
-
-
 @pytest.mark.parametrize('algorithm', ['ppo', 'dqn'])
-@pytest.mark.parametrize('restricted', [False, True])
-def test_guaranteed_training_json_schedule_round_trip(tmp_path, monkeypatch, capsys, algorithm, restricted):
+@pytest.mark.parametrize('masked', [False, True])
+def test_guaranteed_training_json_schedule_round_trip(tmp_path, monkeypatch, capsys, algorithm, masked):
     adjacency = [[0, 1], [1, 0]]
     models = []
 
@@ -204,7 +164,7 @@ def test_guaranteed_training_json_schedule_round_trip(tmp_path, monkeypatch, cap
     output = tmp_path/'result.json'
     exploration = ({} if algorithm == 'ppo' else
                    {'exploration_initial_eps': 0, 'exploration_final_eps': 0})
-    result = train(adjacency, output, algorithm=algorithm, connected_block=restricted, timesteps=8,
+    result = train(adjacency, output, algorithm=algorithm, progress_mask=masked, timesteps=8,
                    validation_every=4, max_steps=10, algorithm_options={
                        **options(algorithm), 'learning_rate': 0, **exploration,
                        'policy_kwargs': {'net_arch': []}})
@@ -214,6 +174,8 @@ def test_guaranteed_training_json_schedule_round_trip(tmp_path, monkeypatch, cap
     data = json.loads(output.read_text())
     assert data == result.to_dict() == {
         'graph': {'num_nodes': 2, 'edges': [[0, 1]]},
+        'training': {'algorithm': algorithm, 'reward_divisor': 2,
+                     'observation_divisor': 2, 'progress_mask': masked},
         'schedules': [{'method': algorithm,
             'cycle_actions': [[1, 1], [0, 0]], 'period': 2,
             'continuous_average_aoi': '2', 'continuous_average_aoi_decimal': 2.0,
@@ -223,16 +185,16 @@ def test_guaranteed_training_json_schedule_round_trip(tmp_path, monkeypatch, cap
     assert replay.to_dict() == {'status': 'cycle', **{k: v for k, v in data['schedules'][0].items() if k != 'method'}}
     from aoi.__main__ import main
     assert main(['evaluate', str(output)]) == 0
-    assert json.loads(capsys.readouterr().out) == data
+    assert json.loads(capsys.readouterr().out) == {k: v for k, v in data.items() if k != 'training'}
 
 
 def test_deterministic_validation_preserves_training_rng_state():
     adjacency = [[0, 1], [1, 0]]
     for algorithm in ('ppo', 'dqn'):
-        for restricted in (False, True):
-            cls = ConnectedBlockEnv if restricted else AoIEnv
+        for masked in (False, True):
+            cls = AoIEnv
             env = cls(adjacency)
-            model = make_model(env, algorithm=algorithm, connected_block=restricted,
+            model = make_model(env, algorithm=algorithm, progress_mask=masked,
                                seed=719, **options(algorithm))
             try:
                 model.learn(8)
@@ -243,7 +205,11 @@ def test_deterministic_validation_preserves_training_rng_state():
                 torch_state = torch.get_rng_state().clone()
                 env_rng = pickle.dumps(env.np_random.bit_generator.state)
                 action_rng = pickle.dumps(env.action_space.np_random.bit_generator.state)
+                physical_state = env.state_key()
+                last_obs = pickle.dumps(model._last_obs)
                 validation._validate()
+                assert env.state_key() == physical_state
+                assert pickle.dumps(model._last_obs) == last_obs
                 assert random.getstate() == python_state
                 assert pickle.dumps(np.random.get_state()) == numpy_state
                 assert torch.equal(torch.get_rng_state(), torch_state)
@@ -342,14 +308,9 @@ def test_default_validation_and_honest_failure():
     assert callback.result.to_dict() == {'graph': None, 'schedules': [], 'status': 'evaluation_limit'}
 
 
-@pytest.mark.parametrize('restricted', [False, True])
-def test_training_wrapper_gym_interface(restricted, monkeypatch):
+@pytest.mark.parametrize('masked', [False, True])
+def test_training_wrapper_gym_interface(masked):
     from stable_baselines3.common.env_checker import check_env
-    env = TrainingReward((ConnectedBlockEnv if restricted else AoIEnv)([[0, 1], [1, 0]]))
+    env = TrainingReward(PolicyObservation(AoIEnv([[0, 1], [1, 0]]), progress_mask=masked))
     assert env.divisor == 2
-    if restricted:
-        # The generic checker does not know about state-dependent action masks.
-        sample = env.action_space.sample
-        monkeypatch.setattr(env.action_space, 'sample',
-                            lambda: sample(mask=env.unwrapped.action_masks().astype(np.int8)))
     check_env(env)

@@ -40,6 +40,7 @@ def test_exact_average_bounds_and_decimal_serialization(tmp_path, capsys):
     for n, distance, lower, upper, average, peak in [
         (3, '4/3', '23/6', '25/6', '23/6', 7),
         (6, '7/3', '46/3', '52/3', '232/15', 31),
+        (7, '8/3', '127/6', '333/14', '899/42', 43),
     ]:
         adjacency = nx.to_numpy_array(nx.path_graph(n))
         construction = algorithm1_schedule(adjacency)
@@ -51,6 +52,7 @@ def test_exact_average_bounds_and_decimal_serialization(tmp_path, capsys):
         assert list(bounds.values()) == [Fraction(lower), Fraction(upper)]
         metrics = evaluate_schedule(adjacency, construction.actions).metrics
         assert Fraction(lower) <= metrics.continuous_average_aoi <= Fraction(upper)
+        assert metrics.period == construction.t_star
         assert metrics.continuous_average_aoi == Fraction(average)
         assert metrics.continuous_peak_aoi == peak
         output = tmp_path / f'p{n}.json'

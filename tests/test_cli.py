@@ -61,15 +61,15 @@ def test_module_entrypoint():
 
 @pytest.mark.parametrize('source', ['edges', 'graph'])
 @pytest.mark.parametrize('algorithm', ['ppo', 'dqn'])
-@pytest.mark.parametrize('restricted', [False, True])
-def test_training_command_writes_one_file(tmp_path, capsys, algorithm, restricted, source):
+@pytest.mark.parametrize('masked', [False, True])
+def test_training_command_writes_one_file(tmp_path, capsys, algorithm, masked, source):
     graph, output = tmp_path/'graph.json', tmp_path/'result.json'
     graph.write_text(json.dumps({"graph": GRAPH}))
     graph_args = ['--edges', '1-0'] if source == 'edges' else ['--graph', str(graph)]
     args = ['train', *graph_args, '--algorithm', algorithm, '--timesteps', '8',
             '--output', str(output), '--eval-steps', '20', '--validation-every', '0']
-    if restricted:
-        args.append('--connected-block')
+    if masked:
+        args.append('--progress-mask')
     code = main(args)
     result = json.loads(capsys.readouterr().out)
     assert result['graph'] == GRAPH
@@ -80,7 +80,9 @@ def test_training_command_writes_one_file(tmp_path, capsys, algorithm, restricte
         replay = json.loads(capsys.readouterr().out)
         assert replay == {'graph': GRAPH, 'schedules': [result['schedules'][0]]}
     else:
-        assert result == {'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit'}
+        assert result == {'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit',
+                          'training': {'algorithm': algorithm, 'reward_divisor': 2,
+                                       'observation_divisor': 2, 'progress_mask': masked}}
     assert json.loads(output.read_text()) == result
     assert set(tmp_path.iterdir()) == {graph, output}
 
@@ -99,7 +101,9 @@ def test_empty_graph_file_reports_input_error(tmp_path):
 @pytest.mark.parametrize('option, value', [
     ('--reward-divisor', '0'), ('--reward-divisor', '-1'),
     ('--reward-divisor', 'nan'), ('--reward-divisor', 'inf'),
-    ('--reward-divisor', 'oops'), ('--average-window', '-1'),
+    ('--reward-divisor', 'oops'), ('--observation-divisor', '0'),
+    ('--observation-divisor', '-1'), ('--observation-divisor', 'nan'),
+    ('--observation-divisor', 'inf'), ('--observation-divisor', 'oops'), ('--average-window', '-1'),
     ('--average-window', 'nan'), ('--average-window', 'inf'),
     ('--average-window', 'oops')])
 def test_invalid_training_numbers(tmp_path, capsys, option, value):
@@ -236,7 +240,9 @@ def test_training_failure_embeds_graph(tmp_path, capsys, algorithm):
                  '--timesteps', '8', '--eval-steps', '1', '--validation-every', '0',
                  '--output', str(output)]) == 2
     assert json.loads(capsys.readouterr().out) == json.loads(output.read_text()) == {
-        'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit'}
+        'graph': GRAPH, 'schedules': [], 'status': 'evaluation_limit',
+        'training': {'algorithm': algorithm, 'reward_divisor': 2,
+                     'observation_divisor': 2, 'progress_mask': False}}
     with pytest.raises(SystemExit):
         main(['evaluate', str(output)])
     assert 'no verified schedule' in capsys.readouterr().err
@@ -254,7 +260,9 @@ def test_graph_reuse_only_reads_graph(tmp_path, monkeypatch, capsys, source):
     verified = evaluate_schedule(adjacency, [(0, 0), (1, 1)])
     data = {'graph': {'num_nodes': 2, 'edges': [[1, 0]]}}
     if source != 'graph':
-        data.update(bounds={'old_bound': '999'}, schedules=[schedule_entry(verified, source)])
+        data.update(bounds={'old_bound': '999'}, schedules=[schedule_entry(verified, source)],
+                    training={'algorithm': 'old', 'reward_divisor': 999, 'observation_divisor': 999,
+                              'progress_mask': True})
     path = tmp_path / 'input.json'
     path.write_text(json.dumps(data))
     original = path.read_bytes()
@@ -266,7 +274,9 @@ def test_graph_reuse_only_reads_graph(tmp_path, monkeypatch, capsys, source):
         assert main(['train', '--graph', str(path), '--algorithm', 'dqn', '--seed', str(seed),
                      '--timesteps', '8', '--validation-every', '0', '--output', str(output)]) == 0
         result = json.loads(capsys.readouterr().out)
-        assert result == {'graph': GRAPH, 'schedules': [schedule_entry(verified, 'dqn')]}
+        assert result == {'graph': GRAPH, 'schedules': [schedule_entry(verified, 'dqn')],
+                          'training': {'algorithm': 'dqn', 'reward_divisor': 2,
+                                       'observation_divisor': 2, 'progress_mask': False}}
         assert json.loads(output.read_text()) == result
     assert path.read_bytes() == original
 
@@ -309,3 +319,30 @@ def test_decimal_first_terminal_summary(tmp_path, capsys):
     assert 'Average AoI: 3.833333 (23/6)' in captured.err
     entry = json.loads(captured.out)['schedules'][0]
     assert entry['continuous_average_aoi_decimal'] == 3.833333
+
+
+def test_default_ppo_and_removed_flag(tmp_path, capsys):
+    output = tmp_path / 'default.json'
+    main(['train', '--edges', '0-1', '--timesteps', '8', '--eval-steps', '10',
+          '--validation-every', '0', '--output', str(output)])
+    data = json.loads(capsys.readouterr().out)
+    assert data['training'] == {'algorithm': 'ppo', 'reward_divisor': 2,
+                                'observation_divisor': 2, 'progress_mask': False}
+    with pytest.raises(SystemExit) as exc:
+        main(['train', '--edges', '0-1', '--connected-block'])
+    assert exc.value.code == 2
+    assert 'unrecognized arguments: --connected-block' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('algorithm', ['ppo', 'dqn'])
+@pytest.mark.parametrize('arguments,reward,observation', [
+    (['--reward-divisor', '1'], 1, 2),
+    (['--observation-divisor', '1'], 2, 1),
+    (['--reward-divisor', '1', '--observation-divisor', '56'], 1, 56)])
+def test_cli_independent_divisor_overrides(tmp_path, capsys, algorithm, arguments, reward, observation):
+    output = tmp_path / 'scaled.json'
+    main(['train', '--edges', '0-1', '--algorithm', algorithm, '--timesteps', '8',
+          '--eval-steps', '10', '--validation-every', '0', '--output', str(output), *arguments])
+    assert json.loads(capsys.readouterr().out)['training'] == {
+        'algorithm': algorithm, 'reward_divisor': reward,
+        'observation_divisor': observation, 'progress_mask': False}

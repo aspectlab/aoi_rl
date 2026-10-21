@@ -4,28 +4,16 @@ from fractions import Fraction
 from pathlib import Path
 
 import gymnasium as gym
-import networkx as nx
 import numpy as np
 from stable_baselines3 import DQN, PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
-from .blocks import ConnectedBlockEnv
 from .env import AoIEnv
 from .graphs import graph_to_dict, write_json
-from .policies import MaskedActorCriticPolicy, MaskedDQN
+from .observations import PolicyObservation, default_divisor, parse_divisor
+from .policies import MaskedActorCriticPolicy, MaskedDQN, MaskedDQNPolicy
 from .policy_eval import evaluate_policy
 from .schedules import ScheduleResult, positive_integer, schedule_entry
-
-
-def parse_reward_divisor(value):
-    """Validate the finite positive numerical training scale."""
-    try:
-        divisor = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("reward_divisor must be a positive finite number.") from exc
-    if isinstance(value, bool) or not np.isfinite(divisor) or divisor <= 0:
-        raise ValueError("reward_divisor must be a positive finite number.")
-    return divisor
 
 
 def parse_average_window(value):
@@ -46,9 +34,8 @@ class TrainingReward(gym.RewardWrapper):
         super().__init__(env)
         # N*diam(G) is a numerical conditioning heuristic. Positive constant
         # scaling preserves reward ordering, but can affect the learner's updates.
-        self.divisor = (env.unwrapped.n * nx.diameter(
-            nx.from_numpy_array(env.unwrapped.model.adjacency))
-            if divisor is None else parse_reward_divisor(divisor))
+        self.divisor = (default_divisor(env.unwrapped.model)
+                        if divisor is None else parse_divisor(divisor, "reward_divisor"))
 
     def reward(self, reward):
         return reward / self.divisor
@@ -66,6 +53,7 @@ class TrainingResult:
     schedules: list[ScheduleResult] = field(default_factory=list)
     graph: dict | None = None
     method: str = "ppo"
+    training: dict | None = None
 
     @property
     def status(self):
@@ -94,24 +82,36 @@ class TrainingResult:
     def to_dict(self):
         data = {"graph": self.graph,
                 "schedules": [schedule_entry(s, self.method) for s in self.schedules]}
+        if self.training is not None:
+            data["training"] = dict(self.training)
         if not self.schedules:
             data["status"] = self.status
         return data
 
 
-def make_model(env, *, algorithm="ppo", connected_block=False, gamma=0.999,
-               seed=0, device="cpu", reward_divisor=None, **algorithm_options):
-    """Construct SB3 with training-only reward scaling and unchanged masks."""
+def make_model(env, *, algorithm="ppo", progress_mask=False, gamma=0.999,
+               seed=0, device="cpu", reward_divisor=None, observation_divisor=None,
+               **algorithm_options):
+    """Construct SB3 with independent scales and optional exact action support.
+
+    Pass a physical AoIEnv. The returned model records its effective settings so
+    evaluate_policy applies the same observation convention to a fresh AoIEnv.
+    """
     if algorithm not in ("ppo", "dqn"):
         raise ValueError("Algorithm must be ppo or dqn.")
     if not np.isfinite(gamma) or not 0 < gamma <= 1:
         raise ValueError("Gamma must be in (0, 1].")
-    if connected_block != isinstance(env.unwrapped, ConnectedBlockEnv):
-        raise ValueError("Policy restriction and environment must agree.")
-    cls = PPO if algorithm == "ppo" else (MaskedDQN if connected_block else DQN)
-    policy = MaskedActorCriticPolicy if algorithm == "ppo" and connected_block else "MlpPolicy"
-    return cls(policy, TrainingReward(env, reward_divisor), gamma=gamma,
-               seed=seed, device=device, **algorithm_options)
+    observations = PolicyObservation(env, observation_divisor, progress_mask=progress_mask)
+    training_env = TrainingReward(observations, reward_divisor)
+    cls = PPO if algorithm == "ppo" else (MaskedDQN if progress_mask else DQN)
+    policy = ((MaskedActorCriticPolicy if algorithm == "ppo" else MaskedDQNPolicy)
+              if progress_mask else "MlpPolicy")
+    model = cls(policy, training_env, gamma=gamma, seed=seed, device=device,
+                **algorithm_options)
+    model.aoi_training = {"algorithm": algorithm, "reward_divisor": training_env.divisor,
+                          "observation_divisor": observations.divisor,
+                          "progress_mask": bool(progress_mask)}
+    return model
 
 
 class ScheduleFrontier(BaseCallback):
@@ -130,9 +130,9 @@ class ScheduleFrontier(BaseCallback):
         self.result = TrainingResult()
 
     def _validate(self):
-        # A fresh, unscaled environment isolates resets and block memory from the
-        # live rollout. Deterministic prediction avoids exploration RNG draws;
-        # exact evaluation measures physical ages, independent of reward scaling.
+        # A fresh physical environment isolates validation from the live rollout.
+        # evaluate_policy uses the model's scaling and exact masks; deterministic
+        # prediction avoids exploration RNG draws. Metrics use integer ages.
         env = self.env_factory()
         try:
             candidate = evaluate_policy(self.model, env, max_steps=self.max_steps)
@@ -151,17 +151,19 @@ class ScheduleFrontier(BaseCallback):
         self._validate()
 
 
-def train(adjacency, output="result.json", *, algorithm="ppo", connected_block=False,
+def train(adjacency, output="result.json", *, algorithm="ppo", progress_mask=False,
           timesteps=1_000_000, seed=0, gamma=0.999, validation_every=25_000,
-          max_steps=50_000, device="cpu", reward_divisor=None, average_window=1,
-          algorithm_options=None):
+          max_steps=50_000, device="cpu", reward_divisor=None, observation_divisor=None,
+          average_window=1, algorithm_options=None):
     """Train PPO/DQN and return a TrainingResult, also written to new JSON output.
 
-    ``adjacency`` follows AoIEnv's requirements; ``connected_block`` selects the
-    heuristic restriction. ``timesteps`` is the requested SB3 budget (PPO may
-    finish its rollout); ``algorithm_options`` passes extra SB3 settings through.
-    ``reward_divisor=None`` uses N*diam(G); a positive override affects training
-    only. ``gamma`` discounts learner returns, not the exact physical metrics.
+    ``adjacency`` follows AoIEnv's requirements; ``progress_mask`` optionally excludes
+    relays that cannot improve a receiver. ``timesteps`` is the requested SB3
+    budget (PPO may finish its rollout); ``algorithm_options`` passes extra SB3
+    settings through.
+    Both divisors default to N*diam(G), with independent positive overrides.
+    Observation scaling also applies during deterministic policy validation.
+    ``gamma`` discounts learner returns, not the exact physical metrics.
 
     ``validation_every=0`` requests final validation only; otherwise validation
     also runs at that step interval. ``max_steps`` bounds each policy evaluation.
@@ -176,17 +178,18 @@ def train(adjacency, output="result.json", *, algorithm="ppo", connected_block=F
     if not output.parent.is_dir():
         raise FileNotFoundError(f"Output parent directory does not exist: {output.parent}")
     positive_integer(timesteps, "timesteps")
-    env_type = ConnectedBlockEnv if connected_block else AoIEnv
-    env = env_type(adjacency)
+    env = AoIEnv(adjacency)
     try:
-        callback = ScheduleFrontier(lambda: env_type(env.model.adjacency),
+        callback = ScheduleFrontier(lambda: AoIEnv(env.model.adjacency),
                                     validation_every=validation_every, max_steps=max_steps,
                                     average_window=average_window)
         callback.result.method = algorithm
         callback.result.graph = graph_to_dict(env.model.adjacency)
-        model = make_model(env, algorithm=algorithm, connected_block=connected_block,
+        model = make_model(env, algorithm=algorithm, progress_mask=progress_mask,
                            gamma=gamma, seed=seed, device=device, reward_divisor=reward_divisor,
+                           observation_divisor=observation_divisor,
                            **(algorithm_options or {}))
+        callback.result.training = dict(model.aoi_training)
         model.learn(total_timesteps=timesteps, callback=callback)
         write_json(callback.result.to_dict(), output)
         return callback.result

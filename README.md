@@ -1,7 +1,9 @@
 # Age of Information scheduling
 
 **Graph edges → PPO / DQN or Algorithm 1 → self-contained JSON → exact AoI.**
-Training retains the best-average word and useful lower-peak alternatives.
+PPO is the default learner; both PPO and DQN use unrestricted scheduling by
+default, with optional physical-progress action masking. Training retains the
+best-average word and useful lower-peak alternatives.
 
 ## Installation
 
@@ -27,7 +29,7 @@ to these evaluators.
 | Module | Responsibility |
 | --- | --- |
 | `env.py` | Physical AoI simulation and unrestricted environment. |
-| `blocks.py` | Connected-block restrictions and their explicit memory. |
+| `observations.py` | Independent observation scaling and shared exact progress mask. |
 | `policies.py` | PPO/DQN integration and action masking throughout learning. |
 | `train.py` | Training, isolated validation, and discovered-frontier retention. |
 | `schedules.py`, `policy_eval.py` | Exact fixed-word and deterministic-policy recurrence evaluation. |
@@ -111,10 +113,11 @@ Neither is a universal bound or optimality certificate for arbitrary-period
 PPO/DQN schedules. Training does not compute these bounds or enumerate MCDSs.
 Achieved metrics always come from independent exact schedule replay.
 For P6, the bounds are `46/3` and `52/3`, while the constructed 26-transmission
-word achieves average `232/15` and supremum peak `31`.
+word achieves average `232/15` and supremum peak `31`. For P7, the constructed
+word has period `37`, average `899/42`, and supremum peak `43`.
 
 Every JSON document requires `graph`; `bounds`, `schedules`, and unsuccessful
-`status` are optional. Algorithm 1 outputs `graph`, `bounds`, and a one-entry
+`status` are optional; training results also include a small `training` object. Algorithm 1 outputs `graph`, `bounds`, and a one-entry
 `schedules` array. Each bound has an exact rational string and a matching
 `_decimal` JSON number rounded to six places.
 
@@ -122,21 +125,21 @@ Reuse any result as graph input, creating a separate file for each run:
 
 ```bash
 python -m aoi algorithm1 --edges "0-1,1-2,2-3,3-4,4-5" --output alg1.json
-python -m aoi train --graph alg1.json --algorithm ppo --connected-block --seed 0 --output ppo_seed0.json
+python -m aoi train --graph alg1.json --progress-mask --seed 0 --output ppo_seed0.json
 ```
 
 `--graph` reads only the labeled graph from graph-only, Algorithm 1, training,
-or evaluation documents. Previous bounds and schedules are never carried over.
+or evaluation documents. Previous bounds, schedules, and training metadata are never carried over.
 Every output creates a new file: existing paths (including the input path) are
 rejected without modification. Results are never merged or appended.
 
 ## PPO and DQN
 
 ```bash
-python -m aoi train --graph graph.json --algorithm ppo --output ppo.json
+python -m aoi train --graph graph.json --output ppo.json
 python -m aoi train --graph graph.json --algorithm dqn --output dqn.json
-python -m aoi train --graph graph.json --algorithm ppo --connected-block --output ppo-block.json
-python -m aoi train --graph graph.json --algorithm dqn --connected-block --output dqn-block.json
+python -m aoi train --graph graph.json --progress-mask --output ppo-masked.json
+python -m aoi train --graph graph.json --algorithm dqn --progress-mask --output dqn-masked.json
 ```
 
 Training saves one JSON file containing the graph, verified periodic words,
@@ -147,18 +150,25 @@ The environment reward is exactly negative **unscaled post-transmission average
 age** over all `N*(N-1)` ordered nonlocal pairs. Peak age does not enter the reward.
 Only the PPO/DQN training interface divides this raw reward by
 `S(G) = N*diameter(G)`, computed using NetworkX without MCDS or `T*` search.
-This is an empirical numerical-conditioning heuristic, not a mathematical
-requirement or a proven optimal scale. Observations and physical dynamics are
-unchanged; deterministic evaluation and exact metrics remain unscaled.
+The neural networks receive exactly `N*(N-1)` physical-age features, also
+divided by `N*diameter(G)` by default. Reward and observation divisors are
+independent. These are empirical conditioning choices, not proven optimal scales.
+The integer physical state, transitions, raw rewards, recurrence keys, and exact
+AoI metrics remain unchanged. Deterministic policy validation uses the same
+observation divisor as training.
 
-Use `--reward-divisor 26` to override the divisor or `--reward-divisor 1` to
-train with raw rewards. Explicit divisors must be positive and finite. There is
-no clipping, normalization, or nonlinear shaping. PPO and DQN optimize discounted
-returns from the scaled reward; they do not directly solve the infinite-horizon
-average-reward optimization problem.
+```bash
+python -m aoi train --graph graph.json --observation-divisor 1 --output raw-ages.json
+python -m aoi train --graph graph.json --reward-divisor 1 --observation-divisor 56 --output custom.json
+```
+
+Both flags accept positive, finite values; `1` disables the corresponding scaling.
+There is no clipping, logarithm, running normalization, or standardization.
+PPO and DQN optimize discounted returns from scaled rewards; they do not directly
+solve the infinite-horizon average-reward optimization problem.
 
 The process is genuinely continuing: every step returns `terminated=False` and
-`truncated=False`. Physical state and block memory persist across PPO rollout
+`truncated=False`. Physical state persists across PPO rollout
 boundaries and DQN updates. Evaluation uses separate environments and does not
 reset the live training trajectory.
 
@@ -188,26 +198,45 @@ there are no validation logs or historical discoveries. The window affects
 reporting only: the training objective remains average AoI.
 
 A finite run need not discover a recurrent schedule. If none is verified,
-`result.json` contains `graph`, `"schedules": []`, and `"status": "evaluation_limit"`,
+`result.json` contains `graph`, `training`, `"schedules": []`, and `"status": "evaluation_limit"`,
 with no invented schedule or recurrent metrics. This does not establish divergence.
 
-## Action spaces and connected blocks
+## Optional physical-progress masking
 
-All `N*N` action indices are present in both modes: pair `(i, j)` has index
-`i*N + j`. Unrestricted policies can select any pair, including redundant relays.
-Their observations are unnormalized `float32` ages; physical state stays integer.
+All `N*N` actions remain represented: pair `(i, j)` has index `i*N + j`.
+By default, PPO and DQN can select any pair, including redundant relays.
+`--progress-mask` enables the same physical rule for either algorithm:
 
-Connected-block policies additionally observe an active-source one-hot vector
-and current-update holder bits. Every source transmission starts a fresh block,
-even for the same source. A relay must transmit the active process and already
-hold that block's update. Its neighbors become holders. Repeated relays remain
-legal; branches can follow any earlier informed transmitter. Switching sources
-discards the old block memory.
+- Every fresh-source action `(j, j)` is legal, including consecutive updates.
+- A relay `(i, j)` is legal exactly when some neighbor `m != j` satisfies
+  `A[i,j] < A[m,j]` in the exact pre-slot integer state.
 
-PPO masks sampling, deterministic prediction, log probabilities, and entropy.
-DQN masks warmup, exploration, greedy prediction, online Q values, and successor
-target maxima. Memory is stored with observations and included in recurrence
-keys. Connected-block search is a heuristic restriction, not proved lossless.
+Both ages increment by one in the physical transition, so the strict inequality
+means at least one receiver improves relative to passive aging. Equal-age copies
+do not count. Sources can interleave arbitrarily; dissemination can be interrupted,
+abandoned, or resumed. There is no source ordering, deadline, fairness rule, or
+requirement to finish disseminating an update. The mask changes RL action support
+only; the physical environment still accepts every transmission.
+
+PPO uses the same stored support for sampling, action likelihoods, policy-gradient
+updates, entropy, and deterministic prediction. DQN explores uniformly among
+legal actions and maximizes Q only over legal actions. Its **standard DQN** target
+maximizes target-network Q over the exact next-state legal actions, with unchanged
+terminal handling and target synchronization. It does not use Double DQN.
+
+Exact masks are buffered separately from age features, never reconstructed from
+rounded observations or fed to the neural networks. SB3's dictionary buffers keep
+masks aligned with rollout observations and replay successors. DQN stores current
+and next masks in one byte per action each (`2*N*N` extra bytes per transition).
+No extra physical states or controller memory are stored.
+
+In controlled path-graph experiments, observation scaling greatly improved PPO on
+P7, and progress masking substantially accelerated recurrence discovery on P7 and
+P8. Unmasked PPO sometimes found lower-average schedules; the higher-quality
+unmasked schedules examined were themselves progress-mask legal. These results
+do not prove general superiority on other topologies or global losslessness.
+The scientific benefit of progress masking for **DQN has not yet been established
+experimentally**.
 
 ## Periodic schedules and exact metrics
 
@@ -221,6 +250,7 @@ A successful learned result has this schema (a two-node example):
 ```json
 {
   "graph": {"num_nodes": 2, "edges": [[0, 1]]},
+  "training": {"algorithm": "ppo", "reward_divisor": 2, "observation_divisor": 2, "progress_mask": false},
   "schedules": [{
     "method": "ppo",
     "cycle_actions": [[1, 1], [0, 0]],
@@ -245,13 +275,13 @@ For learned results its length is the controlled-policy recurrence period.
 `period` is the exact physical recurrent period found by independent unrestricted
 fixed-word replay, after removing exact repeated copies of a shorter word. It
 can differ from the length of the observed controlled-policy cycle. The full
-learned action word is retained to preserve its exact ordering and memory
+learned action word is retained to preserve its exact ordering and physical-state
 closure. No rotation is applied.
 
 Every exported result embeds its graph exactly once at the top level.
 Explicit evaluation outputs the graph and one selected, independently evaluated
 schedule in `schedules`. It preserves the saved method when present and uses
-`evaluation` for a standalone word. It does not copy analytical bounds.
+`evaluation` for a standalone word. It does not copy analytical bounds or training metadata.
 A hand-written input needs only `{"cycle_actions": [[0, 0], [1, 1]]}` for a
 suitable graph, supplied explicitly:
 
@@ -269,7 +299,7 @@ recomputes metrics through the same independent unrestricted fixed-word evaluato
 rather than trusting supplied values.
 
 Policy recurrence is detected from the first boundary using the complete integer
-state, plus active process and holder memory when restricted. Repeated float
+physical state. Repeated float
 observations, actions, or rewards do not establish recurrence. Any detected word
 is independently replayed unrestricted and must agree exactly on both metrics.
 Only stationary memoryless policies are supported by this evaluator.
@@ -303,7 +333,7 @@ schedule is produced or an input is invalid.
 The Python APIs continue to accept NumPy adjacency matrices.
 
 ```python
-from aoi import AoIEnv, ConnectedBlockEnv, evaluate_schedule
+from aoi import AoIEnv, evaluate_schedule, progress_mask
 from aoi.algorithm1 import algorithm1_schedule
 from aoi import evaluate_policy
 from aoi.train import train
@@ -312,15 +342,21 @@ construction = algorithm1_schedule(adjacency)
 result = evaluate_schedule(adjacency, construction.actions)
 print(result.metrics.continuous_average_aoi)  # fractions.Fraction
 
-selected = train(adjacency, "result.json", algorithm="dqn", connected_block=True)
+selected = train(adjacency, "result.json", algorithm="dqn", progress_mask=True,
+                 reward_divisor=None, observation_divisor=None)
 ```
 
 `AoIEnv.model.transition(state, action)` is the pure integer transition.
 `evaluate_policy(model, env, max_steps=50000)` evaluates an in-memory frozen model
 in a separate environment. `train` accepts `algorithm_options` for SB3 numerical
-settings, `reward_divisor=None` for automatic scaling (or a positive override),
+settings, independent `reward_divisor=None` and `observation_divisor=None`
+for automatic scaling (or positive overrides), `progress_mask=False`,
 `average_window="1"` for the exact window, and `validation_every=25000`.
 It returns a `TrainingResult`: `schedules` holds the sorted frontier of
 `ScheduleResult` objects and `to_dict()` gives the saved JSON schema.
-`make_model` applies the same training reward wrapper. The base `AoIEnv` and
-`ConnectedBlockEnv` always return raw rewards.
+`make_model(AoIEnv(adjacency), ...)` accepts the same algorithm, mask, and scale
+choices and returns an in-memory SB3 model. `evaluate_policy(model, AoIEnv(adjacency))`
+automatically uses that model's observation divisor and progress-mask setting.
+The base `AoIEnv` always returns raw age observations and raw rewards;
+training wrappers alone apply numerical scaling. `progress_mask(env.model, env.state)`
+returns the shared boolean action support without modifying physical state.
