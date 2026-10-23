@@ -27,11 +27,11 @@ class PolicyResult:
 
 
 def evaluate_policy(model, env, *, max_steps=50_000) -> PolicyResult:
-    """Record the exact transient and controlled cycle of a stationary MLP policy.
+    """Record the exact transient and cycle of a stationary, memoryless policy.
 
-    The returned action word preserves the complete controlled-state recurrence,
-    including its phase. Its length can differ from the independently evaluated
-    periodic word's physical period; the latter is stored in the metrics.
+    The returned action word preserves the complete policy-state cycle and phase.
+    Its length can differ from the physical period found by independent fixed-word
+    replay; that period is stored in the metrics.
 
     Parameters
     ----------

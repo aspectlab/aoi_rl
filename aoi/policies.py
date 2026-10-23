@@ -1,4 +1,4 @@
-"""Focused SB3 support for exact physical-progress masks."""
+"""SB3 PPO and DQN policies with exact physical-progress action masks."""
 import numpy as np
 import torch
 from stable_baselines3 import DQN
@@ -20,9 +20,8 @@ class AgesOnly(BaseFeaturesExtractor):
 class MaskedQNetwork(QNetwork):
     def forward(self, obs):
         q = super().forward(obs)
-        # SB3's standard DQN uses this same forward path for greedy selection
-        # and target-network maximization. Replay supplies the NEXT state's
-        # exact mask, including terminal observations handled by SB3 itself.
+        # Standard DQN uses this path for greedy selection and target-network
+        # maximization. Replay pairs next-state ages with their exact mask.
         return q.masked_fill(~obs["mask"].bool(), -torch.inf)
 
 
@@ -37,10 +36,10 @@ class MaskedDQNPolicy(DQNPolicy):
 
 
 class MaskedDQN(DQN):
-    """Uniform legal exploration; unchanged SB3 Bellman loss and target schedule.
+    """Standard SB3 DQN with uniform exploration over legal actions.
 
-    DictReplayBuffer stores current and next masks as one-byte entries, alongside
-    the corresponding ages. No exact physical states are duplicated in replay.
+    DictReplayBuffer stores current and next masks as one-byte entries alongside
+    their age features. Loss computation and target updates use SB3's DQN methods.
     """
 
     def _random_legal(self, observation):

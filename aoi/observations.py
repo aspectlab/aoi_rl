@@ -1,11 +1,11 @@
-"""Scaled policy ages and exact auxiliary action support; no physical changes."""
+"""Scaled age observations and action masks computed from integer physical states."""
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
 
 def parse_divisor(value, name):
-    """Validate either independent numerical divisor."""
+    """Return a positive finite observation or reward divisor."""
     try:
         divisor = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -16,13 +16,12 @@ def parse_divisor(value, name):
 
 
 def default_divisor(model):
-    # Initialization contains every nonlocal shortest-path distance, whose
-    # maximum is the diameter. No MCDS calculation enters numerical scaling.
+    """Return N*diameter(G) from the shortest-path initial ages."""
     return model.n * int(model.initial_state.max())
 
 
 def progress_mask(model, state):
-    """Legal N² actions from the graph and exact integer (monitor, source) ages.
+    """Return a Boolean mask indexed by transmitter*N + process.
 
     Sources are always legal. A relay i,j is useful iff some neighbor m != j
     has A[i,j] < A[m,j]. Both ages advance by one in the physical transition,
@@ -35,17 +34,17 @@ def progress_mask(model, state):
     local = np.eye(model.n, dtype=bool)
     ages = np.zeros((model.n, model.n), dtype=state.dtype)
     ages[~local] = state
-    # Axis order: transmitter, receiver, source. Never compare a local receiver.
+    # Axis order: transmitter, receiver, process; exclude local receivers.
     useful = ((ages[:, None, :] < ages[None, :, :])
               & model.adjacency[:, :, None] & ~local[None, :, :])
     return (useful.any(axis=1) | local).reshape(-1)
 
 
 class PolicyObservation(gym.ObservationWrapper):
-    """One physical-age representation, with optional buffered mask metadata.
+    """Scale age features and optionally attach the exact progress mask.
 
-    Mask bits travel in an SB3 Dict buffer but never enter neural features.
-    The underlying AoIEnv remains unrestricted and returns its original reward.
+    SB3 Dict buffers keep masks aligned with observations; AgesOnly excludes
+    them from neural features. AoIEnv handles actions and computes raw rewards.
     """
 
     def __init__(self, env, divisor=None, *, progress_mask=False):

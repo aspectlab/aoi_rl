@@ -1,4 +1,4 @@
-"""Graph edges to self-contained periodic schedules and exact AoI metrics."""
+"""Construct, learn, and evaluate periodic AoI transmission schedules."""
 import argparse
 import json
 import sys
@@ -50,40 +50,46 @@ def emit(data, path=None):
 def add_graph_arguments(command, *, required):
     sources = command.add_mutually_exclusive_group(required=required)
     sources.add_argument("--edges", help='Comma-separated undirected edges, e.g. "0-1,1-2".')
-    sources.add_argument("--graph", type=Path, help="Unified JSON document containing graph.")
+    sources.add_argument("--graph", type=Path, help="JSON graph file or toolkit result containing graph.")
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Age of Information scheduling")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name, help_text in (("algorithm1", "Construct the MCDS/DFS schedule."),
-                            ("evaluate", "Evaluate an explicit periodic word.")):
+    for name, help_text in (("algorithm1", "Construct the Algorithm 1 periodic schedule."),
+                            ("evaluate", "Compute exact AoI for a saved periodic schedule.")):
         command = commands.add_parser(name, help=help_text)
         add_graph_arguments(command, required=name != "evaluate")
         if name == "evaluate":
-            command.add_argument("schedule", type=Path)
+            command.add_argument("schedule", type=Path, help="JSON result or standalone action sequence.")
             command.add_argument("--schedule-index", type=int, default=0,
                                  help="Zero-based index in schedules (default 0).")
-        command.add_argument("--output", type=Path)
-        command.add_argument("--max-repetitions", type=int, default=1000)
+        command.add_argument("--output", type=Path,
+                             help="Save JSON to a new file (also printed to stdout).")
+        command.add_argument("--max-repetitions", type=int, default=1000,
+                             help="Recurrence budget in repetitions of the shortest repeating word (default 1000).")
     command = commands.add_parser("train", help="Train PPO or DQN and save verified schedule tradeoffs.")
     add_graph_arguments(command, required=True)
     command.add_argument("--algorithm", choices=("ppo", "dqn"), default="ppo",
                          help="Training algorithm (default ppo).")
     command.add_argument("--progress-mask", action="store_true",
-                         help="Exclude relays without physical progress (default off).")
-    command.add_argument("--output", type=Path, default=Path("result.json"))
-    command.add_argument("--timesteps", type=int, default=1_000_000)
-    command.add_argument("--seed", type=int, default=0)
-    command.add_argument("--gamma", type=float, default=0.999)
+                         help="Allow source updates and relays that improve a receiver's age (default off).")
+    command.add_argument("--output", type=Path, default=Path("result.json"),
+                         help="New JSON output file (default result.json).")
+    command.add_argument("--timesteps", type=int, default=1_000_000,
+                         help="Requested training steps; PPO completes its rollout (default 1000000).")
+    command.add_argument("--seed", type=int, default=0, help="Training random seed (default 0).")
+    command.add_argument("--gamma", type=float, default=0.999,
+                         help="Discount factor in (0, 1] (default 0.999).")
     command.add_argument("--validation-every", type=int, default=25_000,
-                         help="Validation cadence; 0 means final validation only.")
-    command.add_argument("--reward-divisor", help="Positive training divisor; default N*diameter(G).")
-    command.add_argument("--observation-divisor", help="Positive observation divisor; default N*diameter(G).")
+                         help="Steps between validations; 0 means final validation only (default 25000).")
+    command.add_argument("--reward-divisor", help="Positive finite reward divisor; 1 disables scaling (default N*diameter(G)).")
+    command.add_argument("--observation-divisor", help="Positive finite age-feature divisor; 1 disables scaling (default N*diameter(G)).")
     command.add_argument("--average-window", default="1",
-                         help="Nonnegative exact average-AoI window (default 1).")
-    command.add_argument("--eval-steps", type=int, default=50_000)
-    command.add_argument("--device", default="cpu")
+                         help="Retain nondominated schedules within this average AoI of the best found (default 1).")
+    command.add_argument("--eval-steps", type=int, default=50_000,
+                         help="Policy recurrence search budget per validation (default 50000 steps).")
+    command.add_argument("--device", default="cpu", help="PyTorch training device (default cpu).")
     args = parser.parse_args(argv)
     try:
         if args.output is not None and args.output.exists():

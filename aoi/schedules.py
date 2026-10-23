@@ -1,4 +1,4 @@
-"""Exact recurrent evaluation of externally repeated transmission words."""
+"""Exact continuous AoI for periodically repeated transmission sequences."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,8 +51,8 @@ class CycleMetrics:
 def cycle_metrics(total_age: int, peak_age: int, period: int, n: int) -> CycleMetrics:
     """Integrate a closed integer-state cycle; peak is a supremum, not a mean."""
     # Each unit slot contributes boundary age + 1/2 to its integral and approaches
-    # boundary age + 1 before reception. On a closed cycle, pre/post-step boundary
-    # samples differ only by a cyclic shift; these are not boundary-only metrics.
+    # boundary age + 1 before reception. On a closed cycle, sampling the starting
+    # or ending boundary of each step gives the same set of ages up to a cyclic shift.
     return CycleMetrics(period, Fraction(total_age, period * n * (n - 1))
                         + Fraction(1, 2), peak_age + 1)
 

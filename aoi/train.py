@@ -1,4 +1,4 @@
-"""Continuing PPO/DQN training with a small exact schedule frontier."""
+"""Continuing PPO/DQN training and exact average/peak schedule selection."""
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -48,7 +48,7 @@ def metric_point(schedule):
 
 @dataclass
 class TrainingResult:
-    """Only nondominated verified words in the current exact average window."""
+    """Nondominated verified schedules within a window of the best discovered average."""
 
     schedules: list[ScheduleResult] = field(default_factory=list)
     graph: dict | None = None
@@ -92,7 +92,7 @@ class TrainingResult:
 def make_model(env, *, algorithm="ppo", progress_mask=False, gamma=0.999,
                seed=0, device="cpu", reward_divisor=None, observation_divisor=None,
                **algorithm_options):
-    """Construct SB3 with independent scales and optional exact action support.
+    """Construct PPO or DQN with independent scaling and optional progress masking.
 
     Pass a physical AoIEnv. The returned model records its effective settings so
     evaluate_policy applies the same observation convention to a fresh AoIEnv.
@@ -130,9 +130,7 @@ class ScheduleFrontier(BaseCallback):
         self.result = TrainingResult()
 
     def _validate(self):
-        # A fresh physical environment isolates validation from the live rollout.
-        # evaluate_policy uses the model's scaling and exact masks; deterministic
-        # prediction avoids exploration RNG draws. Metrics use integer ages.
+        # A fresh environment keeps validation separate from the training trajectory.
         env = self.env_factory()
         try:
             candidate = evaluate_policy(self.model, env, max_steps=self.max_steps)

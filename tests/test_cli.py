@@ -321,7 +321,7 @@ def test_decimal_first_terminal_summary(tmp_path, capsys):
     assert entry['continuous_average_aoi_decimal'] == 3.833333
 
 
-def test_default_ppo_and_removed_flag(tmp_path, capsys):
+def test_default_ppo_and_unknown_flag(tmp_path, capsys):
     output = tmp_path / 'default.json'
     main(['train', '--edges', '0-1', '--timesteps', '8', '--eval-steps', '10',
           '--validation-every', '0', '--output', str(output)])
@@ -329,9 +329,9 @@ def test_default_ppo_and_removed_flag(tmp_path, capsys):
     assert data['training'] == {'algorithm': 'ppo', 'reward_divisor': 2,
                                 'observation_divisor': 2, 'progress_mask': False}
     with pytest.raises(SystemExit) as exc:
-        main(['train', '--edges', '0-1', '--connected-block'])
+        main(['train', '--edges', '0-1', '--unknown-option'])
     assert exc.value.code == 2
-    assert 'unrecognized arguments: --connected-block' in capsys.readouterr().err
+    assert 'unrecognized arguments: --unknown-option' in capsys.readouterr().err
 
 
 @pytest.mark.parametrize('algorithm', ['ppo', 'dqn'])

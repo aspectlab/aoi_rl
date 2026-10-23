@@ -1,4 +1,4 @@
-"""Algorithm 1: source-containing minimum connected dominating sets and DFS."""
+"""Algorithm 1: periodic dissemination via connected dominating sets and DFS."""
 from dataclasses import dataclass
 from itertools import combinations
 from fractions import Fraction
@@ -22,8 +22,9 @@ class Algorithm1Result:
 def algorithm1_schedule(adjacency) -> Algorithm1Result:
     """Construct a deterministic Algorithm 1 word, preserving input node labels.
 
-    Ties use lexicographically first MCDSs and ascending DFS neighbors. Exact
-    MCDS enumeration can take exponential time; no approximation is substituted.
+    Choose a minimum connected dominating set (MCDS) containing each source,
+    or add that source to an MCDS. Ties use lexicographically first MCDSs and
+    ascending DFS neighbors. Exact MCDS enumeration can take exponential time.
 
     ``adjacency`` must satisfy AoIEnv's graph requirements. Returns an
     Algorithm1Result with the word, minimum connected domination number gamma_c,
@@ -85,8 +86,8 @@ def average_age_bounds(adjacency, construction):
 
     The lower bound applies to T*-periodic schedules updating all statuses;
     the upper bound applies to Algorithm 1's constructed schedule. Neither is
-    an optimality certificate for arbitrary-period learned schedules. Reuse the
-    exact MCDS/pseudoleaf result for this adjacency; no schedule metrics enter.
+    an optimality certificate for arbitrary-period learned schedules.
+    ``construction`` must be the Algorithm1Result for this adjacency.
     """
     n = len(adjacency)
     t_star = n * construction.gamma_c + len(construction.pseudoleaves)

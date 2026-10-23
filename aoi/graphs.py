@@ -1,4 +1,4 @@
-"""The public labeled edge-list format; computation still uses adjacency matrices."""
+"""Labeled edge-list JSON and adjacency-matrix conversion."""
 import json
 from pathlib import Path
 import re
@@ -51,14 +51,14 @@ def parse_edges(value):
 
 
 def graph_to_dict(adjacency):
-    """Canonicalize edge order for this labeled graph, never graph isomorphism."""
+    """Serialize edges in sorted order while preserving node labels."""
     adjacency = validate_adjacency(adjacency)
     return {"num_nodes": len(adjacency),
             "edges": np.argwhere(np.triu(adjacency, k=1)).tolist()}
 
 
 def read_json(path):
-    """Reject duplicate object fields instead of silently choosing a graph value."""
+    """Read JSON, rejecting duplicate fields and nonfinite numeric constants."""
     def object_fields(pairs):
         data = {}
         for key, value in pairs:
@@ -82,14 +82,14 @@ def read_graph(path):
 
 
 def graph_from_document(data):
-    """Read only the required graph; previous bounds and schedules are ignored."""
+    """Read the required graph field independently of other document contents."""
     if not isinstance(data, dict) or "graph" not in data:
         raise ValueError("Unified JSON document must contain a graph field.")
     return graph_from_dict(data["graph"])
 
 
 def write_json(data, path):
-    """Create a new JSON file exclusively; never truncate an existing result."""
+    """Write JSON to a new file, raising FileExistsError if the path exists."""
     text = json.dumps(data, indent=2, allow_nan=False) + "\n"
     with Path(path).open("x") as stream:
         stream.write(text)

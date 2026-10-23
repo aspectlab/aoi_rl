@@ -23,7 +23,7 @@ def validate_adjacency(adjacency) -> np.ndarray:
 
 
 class AoIModel:
-    """Pure integer dynamics; state entries are (monitor, process), row major."""
+    """Integer dynamics with nonlocal (monitor, process) ages in monitor-major order."""
 
     def __init__(self, adjacency):
         self.adjacency = validate_adjacency(adjacency)
@@ -40,6 +40,7 @@ class AoIModel:
                                       dtype=np.int64)
 
     def action_index(self, pair) -> int:
+        """Encode (transmitter, process) as transmitter*N + process."""
         if len(pair) != 2 or any(isinstance(x, (bool, np.bool_))
                                 or not isinstance(x, (int, np.integer)) for x in pair):
             raise ValueError("An action must contain two integer node indices.")
@@ -49,6 +50,7 @@ class AoIModel:
         return i * self.n + j
 
     def action_pair(self, action: int) -> tuple[int, int]:
+        """Decode a discrete action as (transmitter, process)."""
         if (isinstance(action, (bool, np.bool_))
                 or not isinstance(action, (int, np.integer))
                 or not 0 <= action < self.n * self.n):
@@ -56,7 +58,7 @@ class AoIModel:
         return divmod(int(action), self.n)
 
     def transition(self, state: np.ndarray, action: int) -> np.ndarray:
-        """Broadcast the transmitter's pre-slot copy, then return post-slot ages."""
+        """Return post-slot ages after a fresh source update or cached relay broadcast."""
         i, j = self.action_pair(action)
         x = np.asarray(state)
         if (x.shape != self.initial_state.shape or x.dtype.kind not in "iu"
@@ -65,8 +67,8 @@ class AoIModel:
         if int(x.max()) >= np.iinfo(np.int64).max:
             raise OverflowError("Age exceeds the supported integer range.")
         y = x.astype(np.int64, copy=True) + 1
-        # A source generates now; a relay sends its cached pre-slot copy. Reading
-        # x (never y) makes reception simultaneous, with no intra-slot forwarding.
+        # Read the pre-slot state so reception is simultaneous, without forwarding
+        # within the slot. Fresh source updates arrive with age 1.
         relay_age = 1 if i == j else int(x[self.lookup[i, j]]) + 1
         monitors = self.neighbors[i]
         indices = self.lookup[monitors[monitors != j], j]
